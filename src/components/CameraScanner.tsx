@@ -58,9 +58,9 @@ export default function CameraScanner({
   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Mode Otomatis di HP: Auto-Jepret & Auto-Simpan Beruntun
+  // Mode Otomatis di HP: Auto-Jepret aktif, namun Hasil Scan TETAP TAMPIL di layar (tidak langsung hilang) sampai guru klik Simpan
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState(true);
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [autoSavePaused, setAutoSavePaused] = useState(false);
   const [recentSavedToast, setRecentSavedToast] = useState<{
     nama: string;
@@ -357,9 +357,9 @@ export default function CameraScanner({
     const startX = (vw - cropW) / 2;
     const startY = (vh - cropH) / 2;
 
-    canvas.width = 900;
-    canvas.height = 636;
-    const ctx = canvas.getContext('2d')!;
+    canvas.width = 1050;
+    canvas.height = 742;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     ctx.drawImage(video, startX, startY, cropW, cropH, 0, 0, canvas.width, canvas.height);
 
     const result = processCameraFrame(canvas, exam, students);
@@ -386,8 +386,8 @@ export default function CameraScanner({
         skor: finalResult.skor,
         benar: finalResult.benar,
       });
-      // Beri jeda 1.8 detik sebelum auto-jepret lembar berikutnya agar guru sempat mengganti kertas LJK
-      cooldownUntilRef.current = performance.now() + 1800;
+      // Beri jeda 2.2 detik sebelum auto-jepret lembar berikutnya agar guru sempat mengganti kertas LJK
+      cooldownUntilRef.current = performance.now() + 2200;
       setLastResult(null);
       setEditingQuestionNo(null);
       setAutoSavePaused(false);
@@ -406,14 +406,14 @@ export default function CameraScanner({
     saving,
   ]);
 
-  // Otomatis simpan hasil scan setelah 1.3 detik jika mode Auto-Simpan aktif dan tidak sedang diedit manual
+  // Jika guru mengaktifkan Auto-Simpan secara manual, beri waktu 3.2 detik agar tetap sempat melihat hasil
   useEffect(() => {
     if (!lastResult || !autoSaveEnabled || autoSavePaused || editingQuestionNo || saving) {
       return;
     }
     const timer = window.setTimeout(() => {
       handleConfirmSave();
-    }, 1300);
+    }, 3200);
     return () => window.clearTimeout(timer);
   }, [autoSaveEnabled, autoSavePaused, editingQuestionNo, handleConfirmSave, lastResult, saving]);
 
@@ -486,9 +486,8 @@ export default function CameraScanner({
                 : nextCornerState
             );
 
-            // Jika LJK terdeteksi (4 sudut / 3 sudut+estimasi / QR+sudut), langsung jepret otomatis!
-            const requiredFrames = detection.qrDetected ? 1 : 2;
-            if (autoCaptureEnabled && !inCooldown && consecutiveReady >= requiredFrames) {
+            // Jika LJK terkunci stabil selama 2 siklus (~280ms), otomatis jepret & tampilkan hasil!
+            if (autoCaptureEnabled && !inCooldown && consecutiveReady >= 2) {
               consecutiveReady = 0;
               handleCapture();
               return;
@@ -516,17 +515,70 @@ export default function CameraScanner({
       img.src = imgUrl;
     });
 
-    canvas.width = 900;
-    canvas.height = 636;
-    const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    // Uji orientasi foto (0 derajat, dan jika foto vertikal/portrait dari HP, uji juga rotasi 90° CW & 90° CCW)
+    const orientations: Array<0 | 90 | 270> =
+      img.height > img.width ? [0, 90, 270] : [0, 90];
+
+    let bestResult: ScanResult | null = null;
+    let bestScoreRank = -1;
+
+    for (const angle of orientations) {
+      const testCanvas = document.createElement('canvas');
+      testCanvas.width = 1050;
+      testCanvas.height = 742;
+      const tCtx = testCanvas.getContext('2d', { willReadFrequently: true })!;
+
+      if (angle === 0) {
+        tCtx.drawImage(img, 0, 0, testCanvas.width, testCanvas.height);
+      } else if (angle === 90) {
+        tCtx.save();
+        tCtx.translate(testCanvas.width / 2, testCanvas.height / 2);
+        tCtx.rotate(Math.PI / 2);
+        tCtx.drawImage(
+          img,
+          -testCanvas.height / 2,
+          -testCanvas.width / 2,
+          testCanvas.height,
+          testCanvas.width
+        );
+        tCtx.restore();
+      } else {
+        tCtx.save();
+        tCtx.translate(testCanvas.width / 2, testCanvas.height / 2);
+        tCtx.rotate(-Math.PI / 2);
+        tCtx.drawImage(
+          img,
+          -testCanvas.height / 2,
+          -testCanvas.width / 2,
+          testCanvas.height,
+          testCanvas.width
+        );
+        tCtx.restore();
+      }
+
+      const candidate = processCameraFrame(testCanvas, exam, students);
+      const answeredCount = candidate.benar + candidate.salah;
+      const qrBonus = !candidate.nama.includes('Tidak Terbaca') ? 500 : 0;
+      const anchorBonus = candidate.anchorsDetected ? 300 : 0;
+      const rank = qrBonus + anchorBonus + answeredCount * 10 + candidate.benar;
+
+      if (rank > bestScoreRank) {
+        bestScoreRank = rank;
+        bestResult = candidate;
+      }
+      if (candidate.anchorsDetected && !candidate.nama.includes('Tidak Terbaca')) {
+        break;
+      }
+    }
+
     URL.revokeObjectURL(imgUrl);
 
-    const result = processCameraFrame(canvas, exam, students);
-    triggerScanFeedback();
-    setEditingQuestionNo(null);
-    setAutoSavePaused(false);
-    setLastResult(applyClassAndStudentOverride(result));
+    if (bestResult) {
+      triggerScanFeedback();
+      setEditingQuestionNo(null);
+      setAutoSavePaused(false);
+      setLastResult(applyClassAndStudentOverride(bestResult));
+    }
     e.target.value = '';
   }
 
@@ -632,9 +684,9 @@ export default function CameraScanner({
                 ? 'bg-blue-600/25 border border-blue-500/60 text-blue-300'
                 : 'bg-slate-800 border border-slate-700 text-slate-400'
             }`}
-            title="Otomatis Simpan & Lanjut ke Lembar Berikutnya"
+            title="Jika OFF, hasil scan tetap tampil di layar sampai Anda klik Simpan"
           >
-            {autoSaveEnabled ? 'Auto-Simpan: ON' : 'Simpan Manual'}
+            {autoSaveEnabled ? 'Auto-Simpan: ON' : 'Tahan Hasil: ON'}
           </button>
 
           {torchSupported && (

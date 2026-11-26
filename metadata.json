@@ -1,0 +1,6 @@
+{
+  "name": "Scanner LJK Kamera HP",
+  "description": "Aplikasi koreksi LJK kamera HP mendukung Pilihan Ganda (PG) & Pilihan Ganda Kompleks (PGK), generator LJK PDF + QR Code, import Excel, dan rekap nilai otomatis.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

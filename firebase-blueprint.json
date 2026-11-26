@@ -1,0 +1,373 @@
+{
+  "entities": {
+    "Student": {
+      "title": "Student",
+      "description": "Data induk siswa yang disediakan oleh Admin/Operator sekolah.",
+      "type": "object",
+      "properties": {
+        "schoolId": {
+          "type": "string",
+          "description": "ID sekolah untuk akses bersama Admin dan Guru",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Admin/Operator pembuat data siswa",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "presensi": {
+          "type": "string",
+          "description": "Nomor presensi siswa",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "nama": {
+          "type": "string",
+          "description": "Nama lengkap siswa",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "kelas": {
+          "type": "string",
+          "description": "Nama kelas siswa",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Waktu pembuatan data siswa (Server Timestamp)"
+        }
+      },
+      "required": ["schoolId", "ownerId", "presensi", "nama", "kelas", "createdAt"]
+    },
+    "Subject": {
+      "title": "Subject",
+      "description": "Master mata pelajaran yang disediakan oleh Admin/Operator untuk cetak LJK dan ujian guru.",
+      "type": "object",
+      "properties": {
+        "schoolId": {
+          "type": "string",
+          "description": "ID sekolah",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Admin pembuat mapel",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kode": {
+          "type": "string",
+          "description": "Kode singkatan mata pelajaran (misal MTK, SOS, BIO)",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "namaMapel": {
+          "type": "string",
+          "description": "Nama lengkap mata pelajaran",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "jenjang": {
+          "type": "string",
+          "description": "Jenjang kelas mata pelajaran (Kelas 10, Kelas 11, Kelas 12, atau Kelas 10, 11 & 12)",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "defaultSoal": {
+          "type": "number",
+          "description": "Kapasitas default jumlah soal pada lembar LJK (misal 40)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Waktu pembuatan mapel (Server Timestamp)"
+        }
+      },
+      "required": ["schoolId", "ownerId", "kode", "namaMapel", "defaultSoal", "createdAt"]
+    },
+    "Exam": {
+      "title": "Exam",
+      "description": "Paket soal & kunci jawaban yang dibuat Guru berdasarkan Mapel dan Kelas dari Admin.",
+      "type": "object",
+      "properties": {
+        "schoolId": {
+          "type": "string",
+          "description": "ID sekolah",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID Guru pembuat kunci jawaban",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "namaUjian": {
+          "type": "string",
+          "description": "Nama paket ujian",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "mapel": {
+          "type": "string",
+          "description": "Mata pelajaran ujian",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "kelas": {
+          "type": "string",
+          "description": "Target kelas ujian",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "jumlahSoal": {
+          "type": "number",
+          "description": "Jumlah soal aktif yang dinilai saat scan (1-40, menyesuaikan soal guru)"
+        },
+        "kapasitasLjk": {
+          "type": "number",
+          "description": "Jumlah bulatan soal default pada kertas LJK (default 40)"
+        },
+        "kunciJawaban": {
+          "type": "object",
+          "description": "Peta kunci jawaban tiap nomor soal aktif (PG atau PGK beserta bobot)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Waktu pembuatan paket ujian (Server Timestamp)"
+        }
+      },
+      "required": [
+        "schoolId",
+        "ownerId",
+        "namaUjian",
+        "mapel",
+        "kelas",
+        "jumlahSoal",
+        "kapasitasLjk",
+        "kunciJawaban",
+        "createdAt"
+      ]
+    },
+    "ScanResult": {
+      "title": "ScanResult",
+      "description": "Hasil pemindaian dan koreksi LJK siswa menggunakan kamera HP.",
+      "type": "object",
+      "properties": {
+        "schoolId": {
+          "type": "string",
+          "description": "ID sekolah",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID guru yang memindai LJK",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "examId": {
+          "type": "string",
+          "description": "ID paket ujian yang dipindai",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentId": {
+          "type": "string",
+          "description": "ID siswa dari QR Code LJK",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "presensi": {
+          "type": "string",
+          "description": "Nomor presensi siswa",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "nama": {
+          "type": "string",
+          "description": "Nama siswa yang terdeteksi",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "kelas": {
+          "type": "string",
+          "description": "Kelas siswa",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "mapel": {
+          "type": "string",
+          "description": "Mata pelajaran yang dipindai",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "benar": {
+          "type": "number",
+          "description": "Jumlah soal benar penuh"
+        },
+        "salah": {
+          "type": "number",
+          "description": "Jumlah soal salah atau parsial"
+        },
+        "kosong": {
+          "type": "number",
+          "description": "Jumlah soal kosong"
+        },
+        "skor": {
+          "type": "number",
+          "description": "Nilai akhir skala 0-100"
+        },
+        "statusRagu": {
+          "type": "boolean",
+          "description": "Penanda jika ada jawaban dobel atau QR tidak terbaca"
+        },
+        "detailJawaban": {
+          "type": "object",
+          "description": "Rekaman jawaban siswa per nomor soal aktif"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Waktu penyimpanan hasil scan (Server Timestamp)"
+        }
+      },
+      "required": [
+        "schoolId",
+        "ownerId",
+        "examId",
+        "studentId",
+        "presensi",
+        "nama",
+        "kelas",
+        "mapel",
+        "benar",
+        "salah",
+        "kosong",
+        "skor",
+        "statusRagu",
+        "detailJawaban",
+        "createdAt"
+      ]
+    },
+    "ClassRoster": {
+      "title": "ClassRoster",
+      "description": "Bundel data siswa 1 Kelas dalam 1 dokumen agar 24 kelas hanya memakai 24 dokumen (Hemat 97% Kuota).",
+      "type": "object",
+      "properties": {
+        "schoolId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kelas": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "siswaMap": {
+          "type": "object",
+          "description": "Map daftar siswa dalam kelas tersebut berdasarkan nomor presensi"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["schoolId", "ownerId", "kelas", "siswaMap", "updatedAt"]
+    },
+    "ClassResultBundle": {
+      "title": "ClassResultBundle",
+      "description": "Bundel seluruh nilai LJK siswa dalam 1 Kelas & 1 Mapel ke dalam 1 dokumen agar 24 Kelas x 13 Mapel hanya memakai 312 dokumen (Hemat 97% Kuota Read & Write).",
+      "type": "object",
+      "properties": {
+        "schoolId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "examId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kelas": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "mapel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "hasilMap": {
+          "type": "object",
+          "description": "Map hasil scan seluruh siswa di kelas tersebut untuk mata pelajaran ini"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["schoolId", "ownerId", "examId", "kelas", "mapel", "hasilMap", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "Koleksi daftar siswa sekolah yang disediakan Admin/Operator"
+    },
+    "/class_rosters/{rosterId}": {
+      "schema": { "$ref": "#/entities/ClassRoster" },
+      "description": "Koleksi bundel daftar siswa per kelas (1 dokumen = 1 kelas penuh)"
+    },
+    "/subjects/{subjectId}": {
+      "schema": { "$ref": "#/entities/Subject" },
+      "description": "Koleksi master mata pelajaran yang disediakan Admin/Operator"
+    },
+    "/exams/{examId}": {
+      "schema": { "$ref": "#/entities/Exam" },
+      "description": "Koleksi paket ujian dan kunci jawaban PG/PGK yang dibuat Guru"
+    },
+    "/results/{resultId}": {
+      "schema": { "$ref": "#/entities/ScanResult" },
+      "description": "Koleksi hasil scan dan koreksi LJK siswa"
+    },
+    "/class_results/{bundleId}": {
+      "schema": { "$ref": "#/entities/ClassResultBundle" },
+      "description": "Koleksi bundel hasil scan LJK per Kelas & Mapel (1 dokumen = seluruh siswa dalam 1 kelas untuk 1 mapel)"
+    }
+  }
+}

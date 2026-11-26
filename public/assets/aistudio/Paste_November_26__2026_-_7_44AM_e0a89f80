@@ -1,0 +1,934 @@
+Berikut adalah **kode lengkap dari awal sampai siap deploy** (Next.js App Router + Vercel + Firebase Firestore) untuk aplikasi koreksi LJK kamera HP ala EvalBee, lengkap dengan:
+
+* **Import Daftar Siswa** dari Excel (`.xlsx`).
+* **Upload Kunci Jawaban** dari Excel (`.xlsx`) atau ketik langsung, mendukung **PG Biasa & PG Kompleks (PGK)** beserta bobot nilainya, tersimpan otomatis ke Firebase.
+* **Generator LJK PDF** siap cetak (Nama, Kelas, Presensi, QR Code, 4 kotak sudut, dan tanda `*` untuk soal PGK).
+* **Scanner Kamera HP** dengan koreksi otomatis & pratinjau visual (Hijau = Benar, Merah = Salah, Kuning = Dobel/Ragu).
+* **Rekap Nilai Real-time & Download Excel (`.xlsx`)**.
+
+---
+
+### Langkah 1: Buat Proyek & Instalasi Paket
+
+Jalankan di terminal:
+
+```bash
+npx create-next-app@latest ljk-omr-app --typescript --tailwind --app
+cd ljk-omr-app
+npm install firebase jspdf qrcode @types/qrcode jsqr @types/jsqr xlsx lucide-react
+
+```
+
+Buat file `.env.local` di folder utama proyek dan isi dengan kredensial proyek Firebase Anda:
+
+```env
+NEXT_PUBLIC_FIREBASE_API_KEY=isi_api_key
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=isi_auth_domain
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=isi_project_id
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=isi_storage_bucket
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=isi_sender_id
+NEXT_PUBLIC_FIREBASE_APP_ID=isi_app_id
+
+```
+
+**Struktur Folder:**
+
+```text
+src/
+├── lib/
+│   ├── firebase.ts         # Koneksi Firebase
+│   ├── ljkLayout.ts        # Koordinat baku LJK A4 (1-50 soal)
+│   ├── ljkGenerator.ts     # Generator LJK PDF + QR Code
+│   ├── omrCameraEngine.ts  # Mesin OMR Kamera HP (PG + PGK)
+│   └── excelHelper.ts      # Import Siswa, Upload Kunci Excel, Export Rekap
+├── components/
+│   └── CameraScanner.tsx   # Antarmuka Kamera HP + Bingkai 4 Sudut
+└── app/
+    └── page.tsx            # Aplikasi Utama (4 Tab)
+
+```
+
+---
+
+### Langkah 2: Koneksi Firebase (`src/lib/firebase.ts`)
+
+```ts
+import { initializeApp, getApps } from "firebase/app";
+import { getFirestore } from "firebase/firestore";
+
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+};
+
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+export const db = getFirestore(app);
+
+```
+
+---
+
+### Langkah 3: Koordinat Baku LJK (`src/lib/ljkLayout.ts`)
+
+```ts
+export const A4_W = 210;
+export const A4_H = 297;
+
+export const ANCHORS = {
+  tl: { x: 12, y: 12 },
+  tr: { x: 190, y: 12 },
+  bl: { x: 12, y: 277 },
+  br: { x: 190, y: 277 },
+  size: 8,
+};
+
+export const OPTIONS = ["A", "B", "C", "D", "E"] as const;
+
+export function getBubblePosition(questionNumber: number, optionIndex: number) {
+  const isRightCol = questionNumber > 25;
+  const row = isRightCol ? questionNumber - 26 : questionNumber - 1;
+
+  const startX = isRightCol ? 118 : 30;
+  const startY = 82;
+  const rowGap = 7.4;
+  const colGap = 9.5;
+
+  return {
+    x: startX + optionIndex * colGap,
+    y: startY + row * rowGap,
+    radius: 2.8,
+  };
+}
+
+```
+
+---
+
+### Langkah 4: Generator LJK PDF (`src/lib/ljkGenerator.ts`)
+
+```ts
+import jsPDF from "jspdf";
+import QRCode from "qrcode";
+import { ANCHORS, OPTIONS, getBubblePosition } from "./ljkLayout";
+
+export interface Student {
+  id: string;
+  presensi: string;
+  nama: string;
+  kelas: string;
+}
+
+export interface QuestionKey {
+  type: "PG" | "PGK";
+  answers: string[]; // PG: ["A"] | PGK: ["A", "C", "E"]
+  weight: number;    // Misal PG: 2, PGK: 6
+}
+
+export interface Exam {
+  id: string;
+  namaUjian: string;
+  mapel: string;
+  kelas: string;
+  jumlahSoal: number;
+  kunciJawaban: Record<string, QuestionKey>;
+}
+
+export async function generateClassLJKPdf(exam: Exam, students: Student[]) {
+  if (students.length === 0) {
+    alert(`Belum ada data siswa untuk kelas ${exam.kelas}.`);
+    return;
+  }
+
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+  for (let i = 0; i < students.length; i++) {
+    const s = students[i];
+    if (i > 0) doc.addPage();
+
+    // 1. 4 Kotak Hitam Sudut (Anchor Markers)
+    doc.setFillColor(0, 0, 0);
+    [ANCHORS.tl, ANCHORS.tr, ANCHORS.bl, ANCHORS.br].forEach((pt) => {
+      doc.rect(pt.x, pt.y, ANCHORS.size, ANCHORS.size, "F");
+    });
+
+    // 2. Kop & Identitas
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text("LEMBAR JAWABAN KOMPUTER (LJK)", 105, 22, { align: "center" });
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text(`${exam.namaUjian} — ${exam.mapel}`, 105, 28, { align: "center" });
+
+    doc.setDrawColor(80);
+    doc.rect(24, 35, 125, 32);
+    doc.setFontSize(10);
+    doc.text(`Nama         : ${s.nama}`, 28, 43);
+    doc.text(`Kelas        : ${s.kelas}`, 28, 50);
+    doc.text(`No. Presensi : ${s.presensi}`, 28, 57);
+    doc.setFontSize(7.5);
+    doc.text("Petunjuk: Hitamkan penuh. Nomor bertanda (*) adalah PG Kompleks (boleh >1 jawaban).", 28, 64);
+
+    // 3. QR Code Identitas Siswa + Ujian
+    const qrPayload = JSON.stringify({ sId: s.id, eId: exam.id });
+    const qrDataUrl = await QRCode.toDataURL(qrPayload, { margin: 1, width: 150 });
+    doc.addImage(qrDataUrl, "PNG", 155, 34, 33, 33);
+
+    // 4. Header Kolom
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    [30, 118].forEach((baseX, colIdx) => {
+      if (colIdx === 1 && exam.jumlahSoal <= 25) return;
+      doc.text("No", baseX - 10, 75);
+      OPTIONS.forEach((opt, idx) => {
+        doc.text(opt, baseX + idx * 9.5, 75, { align: "center" });
+      });
+    });
+
+    // 5. Grid Bulatan A-E
+    doc.setFont("helvetica", "normal");
+    doc.setLineWidth(0.35);
+    for (let q = 1; q <= exam.jumlahSoal; q++) {
+      const firstBubble = getBubblePosition(q, 0);
+      const isPgk = exam.kunciJawaban[String(q)]?.type === "PGK";
+      const labelNo = String(q).padStart(2, "0") + (isPgk ? "*" : "");
+
+      doc.setFontSize(8.5);
+      doc.text(labelNo, firstBubble.x - 10, firstBubble.y + 1.2);
+
+      OPTIONS.forEach((opt, optIdx) => {
+        const pos = getBubblePosition(q, optIdx);
+        doc.circle(pos.x, pos.y, pos.radius, "S");
+        doc.setFontSize(6.5);
+        doc.setTextColor(150);
+        doc.text(opt, pos.x, pos.y + 0.9, { align: "center" });
+        doc.setTextColor(0);
+      });
+    }
+  }
+
+  doc.save(`LJK_${exam.mapel}_${exam.kelas}.pdf`);
+}
+
+```
+
+---
+
+### Langkah 5: Mesin OMR Kamera HP — PG & PGK (`src/lib/omrCameraEngine.ts`)
+
+```ts
+import jsQR from "jsqr";
+import { A4_W, A4_H, OPTIONS, getBubblePosition } from "./ljkLayout";
+import { Exam, Student } from "./ljkGenerator";
+
+export interface ScanResult {
+  studentId: string;
+  presensi: string;
+  nama: string;
+  kelas: string;
+  benar: number;
+  salah: number;
+  kosong: number;
+  skor: number;
+  statusRagu: boolean;
+  detailJawaban: Record<string, string>;
+  previewImage: string;
+}
+
+function getBubbleBrightness(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  radiusPx: number
+): number {
+  const r = Math.max(2, Math.floor(radiusPx * 0.7));
+  const imgData = ctx.getImageData(cx - r, cy - r, r * 2, r * 2).data;
+  let total = 0;
+  let count = 0;
+  for (let i = 0; i < imgData.length; i += 4) {
+    total += (imgData[i] + imgData[i + 1] + imgData[i + 2]) / 3;
+    count++;
+  }
+  return count > 0 ? total / count : 255;
+}
+
+export function processCameraFrame(
+  canvas: HTMLCanvasElement,
+  exam: Exam,
+  students: Student[]
+): ScanResult {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // 1. Baca QR Code Siswa
+  const fullImage = ctx.getImageData(0, 0, w, h);
+  const qr = jsQR(fullImage.data, w, h);
+
+  let student: Student | undefined;
+  if (qr?.data) {
+    try {
+      const parsed = JSON.parse(qr.data);
+      student = students.find((s) => s.id === parsed.sId);
+    } catch {}
+  }
+
+  const scaleX = w / A4_W;
+  const scaleY = h / A4_H;
+
+  let benar = 0;
+  let salah = 0;
+  let kosong = 0;
+  let totalPoin = 0;
+  let maxPoin = 0;
+  let statusRagu = false;
+  const detailJawaban: Record<string, string> = {};
+
+  // 2. Periksa tiap nomor soal
+  for (let q = 1; q <= exam.jumlahSoal; q++) {
+    const qKey = exam.kunciJawaban[String(q)];
+    if (!qKey) continue;
+    maxPoin += qKey.weight;
+
+    const rowScores = OPTIONS.map((opt, optIdx) => {
+      const pos = getBubblePosition(q, optIdx);
+      const cx = pos.x * scaleX;
+      const cy = pos.y * scaleY;
+      const r = pos.radius * scaleX;
+      return { opt, cx, cy, r, brightness: getBubbleBrightness(ctx, cx, cy, r) };
+    });
+
+    const sorted = [...rowScores].sort((a, b) => b.brightness - a.brightness);
+    const paperAvg = (sorted[0].brightness + sorted[1].brightness) / 2;
+    const threshold = paperAvg * 0.72;
+    const filled = rowScores.filter((b) => b.brightness < threshold);
+
+    if (filled.length === 0) {
+      kosong++;
+      detailJawaban[String(q)] = "-";
+      continue;
+    }
+
+    // MODE PG BIASA
+    if (qKey.type === "PG") {
+      if (filled.length > 1) {
+        salah++;
+        statusRagu = true;
+        detailJawaban[String(q)] = "DOBEL";
+        filled.forEach((f) => {
+          ctx.strokeStyle = "#eab308";
+          ctx.lineWidth = 4;
+          ctx.strokeRect(f.cx - f.r, f.cy - f.r, f.r * 2, f.r * 2);
+        });
+      } else {
+        const chosen = filled[0];
+        detailJawaban[String(q)] = chosen.opt;
+        if (qKey.answers.includes(chosen.opt)) {
+          benar++;
+          totalPoin += qKey.weight;
+          ctx.strokeStyle = "#22c55e";
+        } else {
+          salah++;
+          ctx.strokeStyle = "#ef4444";
+        }
+        ctx.lineWidth = 4;
+        ctx.strokeRect(chosen.cx - chosen.r, chosen.cy - chosen.r, chosen.r * 2, chosen.r * 2);
+      }
+    }
+    // MODE PG KOMPLEKS (PGK)
+    else {
+      const chosenOpts = filled.map((f) => f.opt);
+      detailJawaban[String(q)] = chosenOpts.join("");
+
+      if (filled.length === OPTIONS.length) {
+        salah++;
+        filled.forEach((f) => {
+          ctx.strokeStyle = "#ef4444";
+          ctx.lineWidth = 4;
+          ctx.strokeRect(f.cx - f.r, f.cy - f.r, f.r * 2, f.r * 2);
+        });
+        continue;
+      }
+
+      let bCount = 0;
+      let sCount = 0;
+      filled.forEach((f) => {
+        if (qKey.answers.includes(f.opt)) {
+          bCount++;
+          ctx.strokeStyle = "#22c55e";
+        } else {
+          sCount++;
+          ctx.strokeStyle = "#ef4444";
+        }
+        ctx.lineWidth = 4;
+        ctx.strokeRect(f.cx - f.r, f.cy - f.r, f.r * 2, f.r * 2);
+      });
+
+      const kCount = qKey.answers.length;
+      const poinSoal = Math.max(0, (bCount - sCount) / kCount) * qKey.weight;
+      totalPoin += poinSoal;
+
+      if (bCount === kCount && sCount === 0) benar++;
+      else salah++;
+    }
+  }
+
+  const skor = maxPoin > 0 ? Number(((totalPoin / maxPoin) * 100).toFixed(1)) : 0;
+
+  return {
+    studentId: student?.id || `unknown_${Date.now()}`,
+    presensi: student?.presensi || "-",
+    nama: student?.nama || "QR Tidak Terbaca",
+    kelas: student?.kelas || exam.kelas,
+    benar,
+    salah,
+    kosong,
+    skor,
+    statusRagu: statusRagu || !student,
+    detailJawaban,
+    previewImage: canvas.toDataURL("image/jpeg", 0.7),
+  };
+}
+
+```
+
+---
+
+### Langkah 6: Helper Excel — Import Siswa, Upload Kunci, & Export Rekap (`src/lib/excelHelper.ts`)
+
+Di sini guru bisa langsung **upload file Excel Kunci Jawaban** dengan kolom sederhana: `No`, `Kunci`, `Bobot` (contoh: `1 | A | 2` untuk PG, `36 | ACE | 6` untuk PGK).
+
+```ts
+import * as XLSX from "xlsx";
+import { Student, QuestionKey } from "./ljkGenerator";
+import { ScanResult } from "./omrCameraEngine";
+
+// 1. Import Daftar Siswa (Kolom Excel: Presensi, Nama, Kelas)
+export async function parseStudentsExcel(file: File): Promise<Omit<Student, "id">[]> {
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data);
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet);
+
+  return rows.map((row, idx) => ({
+    presensi: String(row.Presensi || row.No || idx + 1).padStart(2, "0"),
+    nama: String(row.Nama || row.NAMA || "Tanpa Nama").trim(),
+    kelas: String(row.Kelas || row.KELAS || "Umum").trim(),
+  }));
+}
+
+// 2. Upload Kunci Jawaban dari Excel (Kolom Excel: No, Kunci, Bobot)
+export async function parseAnswerKeyExcel(
+  file: File,
+  defaultWeightPG = 2,
+  defaultWeightPGK = 6
+): Promise<{ kunciMap: Record<string, QuestionKey>; jumlahSoal: number }> {
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data);
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet);
+
+  const kunciMap: Record<string, QuestionKey> = {};
+  rows.forEach((row, idx) => {
+    const no = String(row.No || row.NO || idx + 1);
+    const raw = String(row.Kunci || row.KUNCI || "A")
+      .toUpperCase()
+      .replace(/[^A-E]/g, "");
+    const answers = Array.from(new Set(raw.split("")));
+    const isPgk = answers.length > 1;
+    const customWeight = Number(row.Bobot || row.BOBOT);
+
+    kunciMap[no] = {
+      type: isPgk ? "PGK" : "PG",
+      answers: answers.length > 0 ? answers : ["A"],
+      weight: customWeight > 0 ? customWeight : isPgk ? defaultWeightPGK : defaultWeightPG,
+    };
+  });
+
+  return { kunciMap, jumlahSoal: Object.keys(kunciMap).length };
+}
+
+// 3. Download Rekap Nilai ke Excel (.xlsx)
+export function exportResultsToExcel(examName: string, results: ScanResult[]) {
+  const rows = [...results]
+    .sort((a, b) => a.presensi.localeCompare(b.presensi))
+    .map((r) => ({
+      "No. Presensi": r.presensi,
+      "Nama Siswa": r.nama,
+      Kelas: r.kelas,
+      "Benar Penuh": r.benar,
+      "Salah/Parsial": r.salah,
+      Kosong: r.kosong,
+      "Nilai Akhir": r.skor,
+      Status: r.statusRagu ? "Perlu Cek Manual" : "Valid",
+    }));
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Rekap Nilai");
+  XLSX.writeFile(wb, `Rekap_Nilai_${examName.replace(/\s+/g, "_")}.xlsx`);
+}
+
+```
+
+---
+
+### Langkah 7: Komponen Kamera HP (`src/components/CameraScanner.tsx`)
+
+```tsx
+"use client";
+import { useRef, useState, useEffect } from "react";
+import { Exam, Student } from "@/lib/ljkGenerator";
+import { processCameraFrame, ScanResult } from "@/lib/omrCameraEngine";
+
+interface Props {
+  exam: Exam;
+  students: Student[];
+  onResultSaved: (res: ScanResult) => Promise<void>;
+}
+
+export default function CameraScanner({ exam, students, onResultSaved }: Props) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [lastResult, setLastResult] = useState<ScanResult | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    return () => stopCamera();
+  }, []);
+
+  async function startCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setCameraOn(true);
+      }
+    } catch {
+      alert("Gagal membuka kamera. Pastikan izin kamera aktif & akses via HTTPS (Vercel).");
+    }
+  }
+
+  function stopCamera() {
+    const stream = videoRef.current?.srcObject as MediaStream | null;
+    stream?.getTracks().forEach((t) => t.stop());
+    setCameraOn(false);
+  }
+
+  function handleCapture() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const targetRatio = 210 / 297;
+
+    let cropW = vw;
+    let cropH = vw / targetRatio;
+    if (cropH > vh) {
+      cropH = vh;
+      cropW = vh * targetRatio;
+    }
+
+    const startX = (vw - cropW) / 2;
+    const startY = (vh - cropH) / 2;
+
+    canvas.width = 1050;
+    canvas.height = 1485;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(video, startX, startY, cropW, cropH, 0, 0, canvas.width, canvas.height);
+
+    const result = processCameraFrame(canvas, exam, students);
+    setLastResult(result);
+  }
+
+  async function handleConfirmSave() {
+    if (!lastResult) return;
+    setSaving(true);
+    await onResultSaved(lastResult);
+    setSaving(false);
+    setLastResult(null);
+  }
+
+  return (
+    <div className="space-y-4">
+      {!cameraOn ? (
+        <button
+          onClick={startCamera}
+          className="w-full py-4 bg-blue-600 text-white rounded-xl font-bold text-lg shadow"
+        >
+          📷 Buka Kamera HP untuk Scan LJK
+        </button>
+      ) : (
+        <div className="space-y-3">
+          <div className="relative w-full max-w-sm mx-auto aspect-[210/297] bg-black rounded-xl overflow-hidden shadow-lg">
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+            <div className="pointer-events-none absolute inset-0 border-2 border-green-400/60">
+              <div className="absolute top-3 left-3 w-7 h-7 border-4 border-green-400" />
+              <div className="absolute top-3 right-3 w-7 h-7 border-4 border-green-400" />
+              <div className="absolute bottom-3 left-3 w-7 h-7 border-4 border-green-400" />
+              <div className="absolute bottom-3 right-3 w-7 h-7 border-4 border-green-400" />
+              <p className="absolute bottom-2 inset-x-0 text-center text-xs text-white bg-black/50 py-1">
+                Sejajarkan 4 kotak hitam LJK dengan kotak hijau
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-2 max-w-sm mx-auto">
+            <button onClick={handleCapture} className="flex-1 py-3 bg-emerald-600 text-white rounded-lg font-bold">
+              ⚡ Jepret & Koreksi
+            </button>
+            <button onClick={stopCamera} className="px-4 py-3 bg-gray-200 text-gray-800 rounded-lg font-medium">
+              Tutup
+            </button>
+          </div>
+        </div>
+      )}
+
+      <canvas ref={canvasRef} className="hidden" />
+
+      {lastResult && (
+        <div className="p-4 border-2 border-blue-500 rounded-xl bg-white shadow-md space-y-3 max-w-sm mx-auto">
+          <div className="flex justify-between items-start">
+            <div>
+              <p className="font-bold text-lg">{lastResult.nama}</p>
+              <p className="text-sm text-gray-500">
+                Kelas {lastResult.kelas} • Presensi {lastResult.presensi}
+              </p>
+            </div>
+            <span className="text-2xl font-extrabold text-blue-600">{lastResult.skor}</span>
+          </div>
+
+          <div className="flex gap-3 text-sm font-medium">
+            <span className="text-green-600">Benar: {lastResult.benar}</span>
+            <span className="text-red-600">Salah/Parsial: {lastResult.salah}</span>
+            <span className="text-gray-500">Kosong: {lastResult.kosong}</span>
+          </div>
+
+          {lastResult.statusRagu && (
+            <p className="text-xs bg-yellow-100 text-yellow-800 p-2 rounded">
+              ⚠️ Ada jawaban dobel atau QR kurang jelas. Periksa pratinjau di bawah.
+            </p>
+          )}
+
+          <img src={lastResult.previewImage} alt="Hasil koreksi" className="w-full rounded border" />
+
+          <div className="flex gap-2">
+            <button
+              onClick={handleConfirmSave}
+              disabled={saving}
+              className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg font-bold"
+            >
+              {saving ? "Menyimpan..." : "✅ Simpan & Scan Berikutnya"}
+            </button>
+            <button onClick={() => setLastResult(null)} className="px-4 py-2.5 bg-red-100 text-red-700 rounded-lg font-medium">
+              Ulangi
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+```
+
+---
+
+### Langkah 8: Halaman Utama (`src/app/page.tsx`)
+
+```tsx
+"use client";
+import { useState, useEffect } from "react";
+import { collection, addDoc, getDocs, query, where } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { generateClassLJKPdf, Student, Exam, QuestionKey } from "@/lib/ljkGenerator";
+import { ScanResult } from "@/lib/omrCameraEngine";
+import { parseStudentsExcel, parseAnswerKeyExcel, exportResultsToExcel } from "@/lib/excelHelper";
+import CameraScanner from "@/components/CameraScanner";
+
+export default function Home() {
+  const [tab, setTab] = useState<"siswa" | "ujian" | "scan" | "rekap">("siswa");
+  const [students, setStudents] = useState<Student[]>([]);
+  const [exams, setExams] = useState<Exam[]>([]);
+  const [selectedExam, setSelectedExam] = useState<Exam | null>(null);
+  const [results, setResults] = useState<ScanResult[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  // Form Ujian & Kunci
+  const [namaUjian, setNamaUjian] = useState("PAS Sosiologi");
+  const [mapel, setMapel] = useState("Sosiologi");
+  const [kelas, setKelas] = useState("XI-A");
+  const [jumlahSoal, setJumlahSoal] = useState(40);
+  const [bobotPG, setBobotPG] = useState(2);
+  const [bobotPGK, setBobotPGK] = useState(6);
+  const [kunciText, setKunciText] = useState("");
+
+  useEffect(() => {
+    loadInitialData();
+  }, []);
+
+  useEffect(() => {
+    if (selectedExam) loadExamResults(selectedExam.id);
+  }, [selectedExam]);
+
+  async function loadInitialData() {
+    const sSnap = await getDocs(collection(db, "students"));
+    setStudents(sSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Student)));
+
+    const eSnap = await getDocs(collection(db, "exams"));
+    const eList = eSnap.docs.map((d) => ({ id: d.id, ...d.data() } as Exam));
+    setExams(eList);
+    if (eList.length > 0 && !selectedExam) setSelectedExam(eList[0]);
+  }
+
+  async function loadExamResults(examId: string) {
+    const q = query(collection(db, "results"), where("examId", "==", examId));
+    const snap = await getDocs(q);
+    setResults(snap.docs.map((d) => d.data() as ScanResult));
+  }
+
+  // 1. Upload Siswa dari Excel -> Auto Simpan ke Firebase
+  async function handleImportStudents(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLoading(true);
+    const parsed = await parseStudentsExcel(file);
+    for (const s of parsed) {
+      await addDoc(collection(db, "students"), s);
+    }
+    await loadInitialData();
+    setLoading(false);
+    alert(`${parsed.length} siswa berhasil disimpan ke database!`);
+  }
+
+  // 2A. Upload Kunci Jawaban dari Excel -> Auto Simpan ke Firebase
+  async function handleUploadKeyExcel(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLoading(true);
+    const { kunciMap, jumlahSoal: total } = await parseAnswerKeyExcel(file, bobotPG, bobotPGK);
+    await addDoc(collection(db, "exams"), {
+      namaUjian,
+      mapel,
+      kelas,
+      jumlahSoal: total,
+      kunciJawaban: kunciMap,
+    });
+    await loadInitialData();
+    setLoading(false);
+    alert(`Kunci jawaban (${total} soal) dari Excel otomatis tersimpan!`);
+  }
+
+  // 2B. Simpan Kunci Jawaban dari Ketikan Manual -> Auto Simpan ke Firebase
+  async function handleSaveExamManual() {
+    const tokens = kunciText.toUpperCase().split(/[\s,]+/).filter(Boolean);
+    const kunciMap: Record<string, QuestionKey> = {};
+
+    for (let i = 0; i < jumlahSoal; i++) {
+      const raw = (tokens[i] || "A").replace(/[^A-E]/g, "");
+      const answers = Array.from(new Set(raw.split("")));
+      const isPgk = answers.length > 1;
+      kunciMap[String(i + 1)] = {
+        type: isPgk ? "PGK" : "PG",
+        answers: answers.length > 0 ? answers : ["A"],
+        weight: isPgk ? bobotPGK : bobotPG,
+      };
+    }
+
+    await addDoc(collection(db, "exams"), {
+      namaUjian,
+      mapel,
+      kelas,
+      jumlahSoal,
+      kunciJawaban: kunciMap,
+    });
+    await loadInitialData();
+    alert("Kunci jawaban tersimpan otomatis di database!");
+  }
+
+  return (
+    <main className="max-w-3xl mx-auto p-4 sm:p-6 font-sans">
+      <h1 className="text-2xl font-bold mb-4">Scanner LJK Kamera HP (PG & PGK)</h1>
+
+      {/* Navigasi Tab */}
+      <div className="grid grid-cols-4 gap-1.5 mb-6 border-b pb-3 text-xs sm:text-sm">
+        {(["siswa", "ujian", "scan", "rekap"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`py-2 px-2 rounded font-semibold ${
+              tab === t ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-700"
+            }`}
+          >
+            {t === "siswa" && "1. Siswa"}
+            {t === "ujian" && "2. Kunci & LJK"}
+            {t === "scan" && "3. Scan HP"}
+            {t === "rekap" && "4. Rekap"}
+          </button>
+        ))}
+      </div>
+
+      {/* TAB 1: DATABASE SISWA */}
+      {tab === "siswa" && (
+        <div className="space-y-4">
+          <div className="p-4 border rounded-lg bg-gray-50 space-y-2">
+            <label className="block font-semibold">Upload Daftar Siswa (.xlsx)</label>
+            <p className="text-xs text-gray-500">Format kolom Excel: Presensi | Nama | Kelas</p>
+            <input type="file" accept=".xlsx,.xls" onChange={handleImportStudents} disabled={loading} />
+          </div>
+          <p className="text-sm font-medium">Total siswa tersimpan di Firebase: {students.length}</p>
+        </div>
+      )}
+
+      {/* TAB 2: BUAT/UPLOAD KUNCI & CETAK LJK */}
+      {tab === "ujian" && (
+        <div className="space-y-5">
+          <div className="p-4 border rounded-lg space-y-3">
+            <h2 className="font-bold">Buat Paket Ujian Baru</h2>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <input className="border p-2 rounded" value={namaUjian} onChange={(e) => setNamaUjian(e.target.value)} placeholder="Nama Ujian" />
+              <input className="border p-2 rounded" value={mapel} onChange={(e) => setMapel(e.target.value)} placeholder="Mapel" />
+              <input className="border p-2 rounded" value={kelas} onChange={(e) => setKelas(e.target.value)} placeholder="Kelas (mis: XI-A)" />
+              <input className="border p-2 rounded" type="number" max={50} value={jumlahSoal} onChange={(e) => setJumlahSoal(Number(e.target.value))} placeholder="Jumlah Soal" />
+              <input className="border p-2 rounded" type="number" value={bobotPG} onChange={(e) => setBobotPG(Number(e.target.value))} placeholder="Bobot PG (mis: 2)" />
+              <input className="border p-2 rounded" type="number" value={bobotPGK} onChange={(e) => setBobotPGK(Number(e.target.value))} placeholder="Bobot PGK (mis: 6)" />
+            </div>
+
+            {/* Opsi A: Upload Excel Kunci */}
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded space-y-1">
+              <p className="text-sm font-semibold text-blue-900">Cara Cepat: Upload File Excel Kunci Jawaban</p>
+              <p className="text-xs text-blue-700">Kolom Excel: No | Kunci (misal A untuk PG, ACE untuk PGK) | Bobot (opsional). Otomatis tersimpan!</p>
+              <input type="file" accept=".xlsx,.xls" onChange={handleUploadKeyExcel} disabled={loading} className="text-sm mt-1" />
+            </div>
+
+            {/* Opsi B: Ketik Manual */}
+            <div className="space-y-2 pt-2 border-t">
+              <p className="text-xs text-gray-600">Atau ketik kunci dipisah spasi (1 huruf = PG, &gt;1 huruf = PGK):</p>
+              <textarea
+                className="w-full border p-2 rounded font-mono text-sm"
+                rows={2}
+                value={kunciText}
+                onChange={(e) => setKunciText(e.target.value)}
+                placeholder="Contoh: A B C D ... AC BDE ABD"
+              />
+              <button onClick={handleSaveExamManual} className="w-full bg-blue-600 text-white py-2 rounded font-semibold">
+                Simpan Kunci Manual
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <h2 className="font-bold">Daftar Ujian & Download LJK PDF</h2>
+            {exams.map((ex) => (
+              <div key={ex.id} className="flex justify-between items-center p-3 border rounded-lg">
+                <div>
+                  <p className="font-semibold">{ex.namaUjian} ({ex.kelas})</p>
+                  <p className="text-xs text-gray-500">{ex.mapel} • {ex.jumlahSoal} Soal</p>
+                </div>
+                <button
+                  onClick={() => generateClassLJKPdf(ex, students.filter((s) => s.kelas === ex.kelas))}
+                  className="bg-green-600 text-white px-3 py-2 rounded text-xs sm:text-sm font-medium"
+                >
+                  Download LJK PDF
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: SCANNER KAMERA HP */}
+      {tab === "scan" && (
+        <div className="space-y-4">
+          <select
+            className="w-full border p-2.5 rounded-lg font-medium"
+            value={selectedExam?.id || ""}
+            onChange={(e) => setSelectedExam(exams.find((x) => x.id === e.target.value) || null)}
+          >
+            {exams.map((ex) => (
+              <option key={ex.id} value={ex.id}>{ex.namaUjian} - {ex.kelas}</option>
+            ))}
+          </select>
+
+          {selectedExam && (
+            <CameraScanner
+              exam={selectedExam}
+              students={students}
+              onResultSaved={async (res) => {
+                await addDoc(collection(db, "results"), {
+                  examId: selectedExam.id,
+                  ...res,
+                  previewImage: "",
+                  scannedAt: new Date().toISOString(),
+                });
+                setResults((prev) => [res, ...prev]);
+              }}
+            />
+          )}
+        </div>
+      )}
+
+      {/* TAB 4: REKAP NILAI & EXPORT EXCEL */}
+      {tab === "rekap" && (
+        <div className="space-y-4">
+          <div className="flex justify-between items-center">
+            <h2 className="font-bold">Rekap: {selectedExam?.namaUjian}</h2>
+            <button
+              onClick={() => selectedExam && exportResultsToExcel(selectedExam.namaUjian, results)}
+              className="bg-emerald-600 text-white px-3 py-2 rounded text-sm font-semibold"
+            >
+              Download Excel (.xlsx)
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full border text-sm">
+              <thead className="bg-gray-100">
+                <tr>
+                  <th className="p-2 border">No</th>
+                  <th className="p-2 border text-left">Nama</th>
+                  <th className="p-2 border">Benar</th>
+                  <th className="p-2 border">Skor</th>
+                  <th className="p-2 border">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.map((r, i) => (
+                  <tr key={i} className={r.statusRagu ? "bg-yellow-50" : ""}>
+                    <td className="p-2 border text-center">{r.presensi}</td>
+                    <td className="p-2 border">{r.nama}</td>
+                    <td className="p-2 border text-center text-green-700 font-bold">{r.benar}</td>
+                    <td className="p-2 border text-center font-bold">{r.skor}</td>
+                    <td className="p-2 border text-center">{r.statusRagu ? "⚠️ Cek" : "✅"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+}
+
+```
+
+---
+
+### Langkah 9: Deploy ke Vercel
+
+1. Push proyek ke GitHub.
+2. Import di [Vercel](https://vercel.com), masukkan 6 variabel `NEXT_PUBLIC_FIREBASE_*` di **Environment Variables**, lalu klik **Deploy**.
+3. Buka tautan Vercel langsung dari **Chrome/Safari di HP** — kamera belakang langsung siap memindai LJK dan hasilnya otomatis masuk ke Firebase serta siap di-download ke Excel.

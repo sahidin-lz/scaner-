@@ -1,0 +1,232 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Hardened Global Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'sahidin30@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidOwnerId(ownerId) {
+      return ownerId is string && isValidId(ownerId) && (
+        (request.auth != null && ownerId == request.auth.uid) ||
+        (request.auth == null && ownerId == 'public_school')
+      );
+    }
+
+    function canAccessSchoolDoc() {
+      return existing().schoolId == 'school_main' || (request.auth != null && existing().ownerId == request.auth.uid);
+    }
+
+    function canModifySchoolDoc() {
+      return existing().schoolId == 'school_main' || (request.auth != null && (existing().ownerId == request.auth.uid || isAdmin()));
+    }
+
+    // Validation Blueprint: Student
+    function isValidStudent(data) {
+      return data.keys().hasAll(['schoolId', 'ownerId', 'presensi', 'nama', 'kelas', 'createdAt'])
+        && data.keys().hasOnly(['schoolId', 'ownerId', 'presensi', 'nama', 'kelas', 'createdAt'])
+        && data.schoolId is string && isValidId(data.schoolId) && data.schoolId == 'school_main'
+        && isValidOwnerId(data.ownerId)
+        && data.presensi is string && data.presensi.size() >= 1 && data.presensi.size() <= 20
+        && data.nama is string && data.nama.size() >= 1 && data.nama.size() <= 120
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 50
+        && data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: Subject (supports optional jenjang: Kelas 10, Kelas 11, Kelas 12)
+    function isValidSubject(data) {
+      return data.keys().hasAll(['schoolId', 'ownerId', 'kode', 'namaMapel', 'defaultSoal', 'createdAt'])
+        && data.keys().hasOnly(['schoolId', 'ownerId', 'kode', 'namaMapel', 'jenjang', 'defaultSoal', 'createdAt'])
+        && data.schoolId is string && isValidId(data.schoolId) && data.schoolId == 'school_main'
+        && isValidOwnerId(data.ownerId)
+        && data.kode is string && data.kode.size() >= 1 && data.kode.size() <= 20
+        && data.namaMapel is string && data.namaMapel.size() >= 1 && data.namaMapel.size() <= 100
+        && (!('jenjang' in data) || (data.jenjang is string && data.jenjang.size() >= 1 && data.jenjang.size() <= 40))
+        && data.defaultSoal is number && data.defaultSoal >= 0 && data.defaultSoal <= 50
+        && data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: Exam
+    function isValidExam(data) {
+      return data.keys().hasAll([
+          'schoolId', 'ownerId', 'namaUjian', 'mapel', 'kelas',
+          'jumlahSoal', 'kapasitasLjk', 'kunciJawaban', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'schoolId', 'ownerId', 'namaUjian', 'mapel', 'kelas',
+          'jumlahSoal', 'kapasitasLjk', 'kunciJawaban', 'createdAt'
+        ])
+        && data.schoolId is string && isValidId(data.schoolId) && data.schoolId == 'school_main'
+        && isValidOwnerId(data.ownerId)
+        && data.namaUjian is string && data.namaUjian.size() >= 1 && data.namaUjian.size() <= 120
+        && data.mapel is string && data.mapel.size() >= 1 && data.mapel.size() <= 100
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 50
+        && data.jumlahSoal is number && data.jumlahSoal >= 1 && data.jumlahSoal <= 50
+        && data.kapasitasLjk is number && data.kapasitasLjk >= 10 && data.kapasitasLjk <= 50
+        && data.kunciJawaban is map && data.kunciJawaban.size() >= 1 && data.kunciJawaban.size() <= 50
+        && data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: ScanResult
+    function isValidScanResult(data) {
+      return data.keys().hasAll([
+          'schoolId', 'ownerId', 'examId', 'studentId', 'presensi', 'nama', 'kelas', 'mapel',
+          'benar', 'salah', 'kosong', 'skor', 'statusRagu', 'detailJawaban', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'schoolId', 'ownerId', 'examId', 'studentId', 'presensi', 'nama', 'kelas', 'mapel',
+          'benar', 'salah', 'kosong', 'skor', 'statusRagu', 'detailJawaban', 'createdAt'
+        ])
+        && data.schoolId is string && isValidId(data.schoolId) && data.schoolId == 'school_main'
+        && isValidOwnerId(data.ownerId)
+        && data.examId is string && isValidId(data.examId)
+        && data.studentId is string && isValidId(data.studentId)
+        && data.presensi is string && data.presensi.size() >= 1 && data.presensi.size() <= 20
+        && data.nama is string && data.nama.size() >= 1 && data.nama.size() <= 120
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 50
+        && data.mapel is string && data.mapel.size() >= 1 && data.mapel.size() <= 100
+        && data.benar is number && data.benar >= 0 && data.benar <= 50
+        && data.salah is number && data.salah >= 0 && data.salah <= 50
+        && data.kosong is number && data.kosong >= 0 && data.kosong <= 50
+        && data.skor is number && data.skor >= 0 && data.skor <= 100
+        && data.statusRagu is bool
+        && data.detailJawaban is map && data.detailJawaban.size() <= 50
+        && data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: ClassRoster (1 dokumen = seluruh siswa dalam 1 kelas)
+    function isValidClassRoster(data) {
+      return data.keys().hasAll(['schoolId', 'ownerId', 'kelas', 'siswaMap', 'updatedAt'])
+        && data.keys().hasOnly(['schoolId', 'ownerId', 'kelas', 'siswaMap', 'updatedAt'])
+        && data.schoolId is string && isValidId(data.schoolId) && data.schoolId == 'school_main'
+        && isValidOwnerId(data.ownerId)
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 50
+        && data.siswaMap is map && data.siswaMap.size() <= 120
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ClassResultBundle (1 dokumen = seluruh nilai LJK 1 kelas untuk 1 mapel)
+    function isValidClassResultBundle(data) {
+      return data.keys().hasAll(['schoolId', 'ownerId', 'examId', 'kelas', 'mapel', 'hasilMap', 'updatedAt'])
+        && data.keys().hasOnly(['schoolId', 'ownerId', 'examId', 'kelas', 'mapel', 'hasilMap', 'updatedAt'])
+        && data.schoolId is string && isValidId(data.schoolId) && data.schoolId == 'school_main'
+        && isValidOwnerId(data.ownerId)
+        && data.examId is string && isValidId(data.examId)
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 50
+        && data.mapel is string && data.mapel.size() >= 1 && data.mapel.size() <= 100
+        && data.hasilMap is map && data.hasilMap.size() <= 120
+        && data.updatedAt is timestamp;
+    }
+
+    // Collection: /admins/{adminId}
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin() && existing().schoolId == 'school_main';
+      allow create, update, delete: if false;
+    }
+
+    // Collection: /students/{studentId}
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && canAccessSchoolDoc();
+      allow list: if canAccessSchoolDoc();
+      allow create: if isValidId(studentId) && isValidStudent(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(studentId) && isValidStudent(incoming())
+        && canModifySchoolDoc()
+        && incoming().schoolId == existing().schoolId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'presensi', 'nama', 'kelas', 'createdAt']);
+      allow delete: if isValidId(studentId) && canModifySchoolDoc();
+    }
+
+    // Collection: /class_rosters/{rosterId} (Hemat 97% Kuota: 1 dokumen per kelas)
+    match /class_rosters/{rosterId} {
+      allow get: if isValidId(rosterId) && canAccessSchoolDoc();
+      allow list: if canAccessSchoolDoc();
+      allow create: if isValidId(rosterId) && isValidClassRoster(incoming()) && incoming().updatedAt == request.time;
+      allow update: if isValidId(rosterId) && isValidClassRoster(incoming())
+        && canModifySchoolDoc()
+        && incoming().schoolId == existing().schoolId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'kelas', 'siswaMap', 'updatedAt']);
+      allow delete: if isValidId(rosterId) && canModifySchoolDoc();
+    }
+
+    // Collection: /subjects/{subjectId}
+    match /subjects/{subjectId} {
+      allow get: if isValidId(subjectId) && canAccessSchoolDoc();
+      allow list: if canAccessSchoolDoc();
+      allow create: if isValidId(subjectId) && isValidSubject(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(subjectId) && isValidSubject(incoming())
+        && canModifySchoolDoc()
+        && incoming().schoolId == existing().schoolId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'kode', 'namaMapel', 'jenjang', 'defaultSoal', 'createdAt']);
+      allow delete: if isValidId(subjectId) && canModifySchoolDoc();
+    }
+
+    // Collection: /exams/{examId}
+    match /exams/{examId} {
+      allow get: if isValidId(examId) && canAccessSchoolDoc();
+      allow list: if canAccessSchoolDoc();
+      allow create: if isValidId(examId) && isValidExam(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(examId) && isValidExam(incoming())
+        && canModifySchoolDoc()
+        && incoming().schoolId == existing().schoolId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'namaUjian', 'mapel', 'kelas', 'jumlahSoal', 'kapasitasLjk', 'kunciJawaban', 'createdAt']);
+      allow delete: if isValidId(examId) && canModifySchoolDoc();
+    }
+
+    // Collection: /results/{resultId}
+    match /results/{resultId} {
+      allow get: if isValidId(resultId) && canAccessSchoolDoc();
+      allow list: if canAccessSchoolDoc();
+      allow create: if isValidId(resultId) && isValidScanResult(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(resultId) && isValidScanResult(incoming())
+        && canModifySchoolDoc()
+        && incoming().schoolId == existing().schoolId
+        && incoming().examId == existing().examId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'ownerId', 'studentId', 'presensi', 'nama', 'kelas', 'mapel',
+          'benar', 'salah', 'kosong', 'skor', 'statusRagu', 'detailJawaban', 'createdAt'
+        ]);
+      allow delete: if isValidId(resultId) && canModifySchoolDoc();
+    }
+
+    // Collection: /class_results/{bundleId} (Hemat 97% Kuota: 1 dokumen per Kelas & Mapel)
+    match /class_results/{bundleId} {
+      allow get: if isValidId(bundleId) && canAccessSchoolDoc();
+      allow list: if canAccessSchoolDoc();
+      allow create: if isValidId(bundleId) && isValidClassResultBundle(incoming()) && incoming().updatedAt == request.time;
+      allow update: if isValidId(bundleId) && isValidClassResultBundle(incoming())
+        && canModifySchoolDoc()
+        && incoming().schoolId == existing().schoolId
+        && incoming().examId == existing().examId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'kelas', 'mapel', 'hasilMap', 'updatedAt']);
+      allow delete: if isValidId(bundleId) && canModifySchoolDoc();
+    }
+  }
+}

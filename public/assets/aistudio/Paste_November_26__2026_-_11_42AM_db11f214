@@ -1,0 +1,933 @@
+```python
+import zipfile, os
+
+zip_path = 'scanner-ljk-kamera-hp-nov-26-2026-11-31-01-am.zip'
+extract_dir = 'extracted_app'
+with zipfile.ZipFile(zip_path, 'r') as z:
+    z.extractall(extract_dir)
+
+for root, dirs, files in os.walk(extract_dir):
+    for f in files:
+        p = os.path.join(root, f)
+        print(p, os.path.getsize(p))
+
+
+```
+
+```text
+extracted_app/README.md 542
+extracted_app/vite.config.ts 1476
+extracted_app/firestore.rules 11968
+extracted_app/bun.lock 130370
+extracted_app/eslint.config.js 204
+extracted_app/firestore.rules.test.ts 5172
+extracted_app/security_spec.md 3050
+extracted_app/firebase-blueprint.json 11232
+extracted_app/firebase-applet-config.json 543
+extracted_app/metadata.json 328
+extracted_app/package.json 1119
+extracted_app/tsconfig.json 561
+extracted_app/.gitignore 73
+extracted_app/.env.example 445
+extracted_app/index.html 900
+extracted_app/src/main.tsx 268
+extracted_app/src/index.css 544
+extracted_app/src/App.tsx 165287
+extracted_app/src/components/CameraScanner.tsx 34746
+extracted_app/src/components/ErrorBoundary.tsx 2557
+extracted_app/src/lib/excelHelper.ts 4766
+extracted_app/src/lib/omrCameraEngine.ts 6523
+extracted_app/src/lib/ljkGenerator.ts 24166
+extracted_app/src/lib/ljkLayout.ts 1685
+extracted_app/src/lib/firebase.ts 2761
+extracted_app/public/assets/aistudio/Paste_November_26__2026_-_7_44AM_e0a89f80 32239
+
+
+```
+
+```python
+def read_file(path):
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+print("=== package.json ===")
+print(read_file('extracted_app/package.json'))
+
+print("\n=== src/lib/ljkLayout.ts ===")
+print(read_file('extracted_app/src/lib/ljkLayout.ts'))
+
+print("\n=== src/lib/omrCameraEngine.ts ===")
+print(read_file('extracted_app/src/lib/omrCameraEngine.ts'))
+
+
+```
+
+```text
+=== package.json ===
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/qrcode": "^1.5.6",
+    "@vitejs/plugin-react": "^6.1.1",
+    "dotenv": "^17.2.3",
+    "eslint": "^10.15.0",
+    "express": "^4.21.2",
+    "firebase": "^13.4.0",
+    "jspdf": "^4.2.1",
+    "jsqr": "^1.4.0",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "vite": "^8.3.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "autoprefixer": "^10.4.21",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^7.0.2",
+    "@types/express": "^4.17.21"
+  }
+}
+
+
+=== src/lib/ljkLayout.ts ===
+export const A4_W = 210;
+export const A4_H = 297;
+
+// Ukuran 1 LJK Hemat Kertas (1 Halaman A4 dibagi 2: Atas & Bawah)
+export const HALF_W = 210;
+export const HALF_H = 148.5;
+export const DEFAULT_LJK_CAPACITY = 40;
+
+export const HALF_ANCHORS = {
+  tl: { x: 10, y: 7 },
+  tr: { x: 194, y: 7 },
+  bl: { x: 10, y: 135.5 },
+  br: { x: 194, y: 135.5 },
+  size: 6,
+};
+
+export const FULL_ANCHORS = {
+  tl: { x: 12, y: 12 },
+  tr: { x: 190, y: 12 },
+  bl: { x: 12, y: 277 },
+  br: { x: 190, y: 277 },
+  size: 8,
+};
+
+export const OPTIONS = ['A', 'B', 'C', 'D', 'E'] as const;
+
+/**
+ * Koordinat bulatan untuk LJK Hemat Kertas (Setengah A4: 210 x 148.5 mm)
+ * Kapasitas Default 40 Soal (4 Kolom x 10 Baris: 1-10, 11-20, 21-30, 31-40)
+ */
+export function getHalfBubblePosition(questionNumber: number, optionIndex: number, offsetY = 0) {
+  const col = Math.floor((questionNumber - 1) / 10); // 0, 1, 2, 3
+  const row = (questionNumber - 1) % 10;             // 0..9
+
+  const colStartX = [27, 70, 113, 156];
+  const startX = colStartX[col] ?? 27;
+  const startY = 58 + offsetY;
+  const rowGap = 7.5;
+  const colGap = 6.2;
+
+  return {
+    x: startX + optionIndex * colGap,
+    y: startY + row * rowGap,
+    radius: 2.25,
+  };
+}
+
+/**
+ * Koordinat bulatan untuk LJK 1 Halaman Penuh A4 (1-50 soal)
+ */
+export function getBubblePosition(questionNumber: number, optionIndex: number) {
+  const isRightCol = questionNumber > 25;
+  const row = isRightCol ? questionNumber - 26 : questionNumber - 1;
+
+  const startX = isRightCol ? 124 : 34;
+  const startY = 82;
+  const rowGap = 7.4;
+  const colGap = 9.5;
+
+  return {
+    x: startX + optionIndex * colGap,
+    y: startY + row * rowGap,
+    radius: 2.8,
+  };
+}
+
+
+=== src/lib/omrCameraEngine.ts ===
+import jsQR from 'jsqr';
+import {
+  HALF_W,
+  HALF_H,
+  DEFAULT_LJK_CAPACITY,
+  OPTIONS,
+  getHalfBubblePosition,
+} from './ljkLayout';
+import { Exam, Student } from './ljkGenerator';
+
+export interface ScanResult {
+  id?: string;
+  examId?: string;
+  studentId: string;
+  presensi: string;
+  nama: string;
+  kelas: string;
+  mapel: string;
+  benar: number;
+  salah: number;
+  kosong: number;
+  skor: number;
+  statusRagu: boolean;
+  detailJawaban: Record<string, string>;
+  previewImage: string;
+}
+
+function getBubbleBrightness(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  radiusPx: number
+): number {
+  const r = Math.max(2, Math.floor(radiusPx * 0.7));
+  const imgData = ctx.getImageData(cx - r, cy - r, r * 2, r * 2).data;
+  let total = 0;
+  let count = 0;
+  for (let i = 0; i < imgData.length; i += 4) {
+    total += (imgData[i] + imgData[i + 1] + imgData[i + 2]) / 3;
+    count++;
+  }
+  return count > 0 ? total / count : 255;
+}
+
+/**
+ * Memproses frame kamera / foto LJK Setengah A4 (Default 40 Soal).
+ * Otomatis menyesuaikan jumlah soal yang dinilai dengan `exam.jumlahSoal` dari Kunci Jawaban Guru,
+ * sehingga meskipun kertas LJK memiliki default 40 soal, soal di luar `exam.jumlahSoal` diabaikan.
+ */
+export function processCameraFrame(
+  canvas: HTMLCanvasElement,
+  exam: Exam,
+  students: Student[]
+): ScanResult {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // 1. Baca QR Code Siswa
+  const fullImage = ctx.getImageData(0, 0, w, h);
+  const qr = jsQR(fullImage.data, w, h);
+
+  let student: Student | undefined;
+  if (qr?.data) {
+    try {
+      const parsed = JSON.parse(qr.data);
+      student =
+        students.find((s) => s.id === parsed.sId) ||
+        (parsed.nm || parsed.prs
+          ? {
+              id: parsed.sId || `qr_${parsed.prs || '01'}`,
+              presensi: parsed.prs || '01',
+              nama: parsed.nm || `Siswa Presensi ${parsed.prs || '01'}`,
+              kelas: parsed.kls || exam.kelas,
+            }
+          : undefined);
+    } catch {
+      // QR payload bukan JSON valid
+    }
+  }
+
+  const scaleX = w / HALF_W;
+  const scaleY = h / HALF_H;
+
+  let benar = 0;
+  let salah = 0;
+  let kosong = 0;
+  let totalPoin = 0;
+  let maxPoin = 0;
+  let statusRagu = false;
+  const detailJawaban: Record<string, string> = {};
+
+  const activeQuestionCount = Math.min(DEFAULT_LJK_CAPACITY, Math.max(1, exam.jumlahSoal));
+
+  // 2. Periksa tiap nomor soal aktif (1 s.d. activeQuestionCount)
+  for (let q = 1; q <= DEFAULT_LJK_CAPACITY; q++) {
+    // Jika nomor soal melebihi jumlah soal yang dipakai Guru, tandai diabaikan dan lanjut
+    if (q > activeQuestionCount) {
+      const firstPos = getHalfBubblePosition(q, 0, 0);
+      const lastPos = getHalfBubblePosition(q, 4, 0);
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(
+        (firstPos.x - firstPos.radius) * scaleX,
+        (firstPos.y - firstPos.radius) * scaleY,
+        (lastPos.x - firstPos.x + firstPos.radius * 2) * scaleX,
+        firstPos.radius * 2 * scaleY
+      );
+      continue;
+    }
+
+    const qKey = exam.kunciJawaban[String(q)];
+    if (!qKey) continue;
+    maxPoin += qKey.weight;
+
+    const rowScores = OPTIONS.map((opt, optIdx) => {
+      const pos = getHalfBubblePosition(q, optIdx, 0);
+      const cx = pos.x * scaleX;
+      const cy = pos.y * scaleY;
+      const r = pos.radius * scaleX;
+      return { opt, cx, cy, r, brightness: getBubbleBrightness(ctx, cx, cy, r) };
+    });
+
+    const sorted = [...rowScores].sort((a, b) => b.brightness - a.brightness);
+    const paperAvg = (sorted[0].brightness + sorted[1].brightness) / 2;
+    const threshold = paperAvg * 0.72;
+    const filled = rowScores.filter((b) => b.brightness < threshold);
+
+    if (filled.length === 0) {
+      kosong++;
+      detailJawaban[String(q)] = '-';
+      // Tandai kunci seharusnya dengan lingkaran biru putus-putus
+      rowScores.forEach((b) => {
+        if (qKey.answers.includes(b.opt)) {
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(b.cx - b.r, b.cy - b.r, b.r * 2, b.r * 2);
+        }
+      });
+      continue;
+    }
+
+    // MODE PG BIASA
+    if (qKey.type === 'PG') {
+      if (filled.length > 1) {
+        salah++;
+        statusRagu = true;
+        detailJawaban[String(q)] = 'DOBEL';
+        filled.forEach((f) => {
+          ctx.strokeStyle = '#eab308';
+          ctx.lineWidth = 3.5;
+          ctx.strokeRect(f.cx - f.r, f.cy - f.r, f.r * 2, f.r * 2);
+        });
+      } else {
+        const chosen = filled[0];
+        detailJawaban[String(q)] = chosen.opt;
+        if (qKey.answers.includes(chosen.opt)) {
+          benar++;
+          totalPoin += qKey.weight;
+          ctx.strokeStyle = '#22c55e';
+        } else {
+          salah++;
+          ctx.strokeStyle = '#ef4444';
+        }
+        ctx.lineWidth = 3.5;
+        ctx.strokeRect(chosen.cx - chosen.r, chosen.cy - chosen.r, chosen.r * 2, chosen.r * 2);
+      }
+    }
+    // MODE PG KOMPLEKS (PGK)
+    else {
+      const chosenOpts = filled.map((f) => f.opt);
+      detailJawaban[String(q)] = chosenOpts.join('');
+
+      if (filled.length === OPTIONS.length) {
+        salah++;
+        filled.forEach((f) => {
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = 3.5;
+          ctx.strokeRect(f.cx - f.r, f.cy - f.r, f.r * 2, f.r * 2);
+        });
+        continue;
+      }
+
+      let bCount = 0;
+      let sCount = 0;
+      filled.forEach((f) => {
+        if (qKey.answers.includes(f.opt)) {
+          bCount++;
+          ctx.strokeStyle = '#22c55e';
+        } else {
+          sCount++;
+          ctx.strokeStyle = '#ef4444';
+        }
+        ctx.lineWidth = 3.5;
+        ctx.strokeRect(f.cx - f.r, f.cy - f.r, f.r * 2, f.r * 2);
+      });
+
+      const kCount = qKey.answers.length;
+      const poinSoal = Math.max(0, (bCount - sCount) / kCount) * qKey.weight;
+      totalPoin += poinSoal;
+
+      if (bCount === kCount && sCount === 0) benar++;
+      else salah++;
+    }
+  }
+
+  const skor = maxPoin > 0 ? Number(((totalPoin / maxPoin) * 100).toFixed(1)) : 0;
+
+  return {
+    studentId: student?.id || `unknown_${Date.now()}`,
+    presensi: student?.presensi || '-',
+    nama: student?.nama || 'QR Tidak Terbaca',
+    kelas: student?.kelas || exam.kelas,
+    mapel: exam.mapel,
+    benar,
+    salah,
+    kosong,
+    skor,
+    statusRagu: statusRagu || !student,
+    detailJawaban,
+    previewImage: canvas.toDataURL('image/jpeg', 0.8),
+  };
+}
+
+
+
+```
+
+```python
+import re
+
+def read_file(path):
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+cam = read_file('extracted_app/src/components/CameraScanner.tsx')
+print(f"CameraScanner.tsx lines: {len(cam.splitlines())}")
+# Print key sections of CameraScanner.tsx: imports, state, anchor detection if any, capture logic
+for i, line in enumerate(cam.splitlines(), 1):
+    if any(k in line for k in ['function ', 'const ', 'useState', 'detect', 'anchor', 'warp', 'homography', 'autoCapture', 'processCameraFrame', 'videoRef', 'canvas', 'overlay']):
+        if len(line.strip()) < 140:
+            print(f"L{i:4d}: {line}")
+
+
+```
+
+```text
+CameraScanner.tsx lines: 791
+L   1: import React, { useRef, useState, useEffect } from 'react';
+L  17: import { processCameraFrame, ScanResult } from '../lib/omrCameraEngine';
+L  32: export default function CameraScanner({
+L  44:   const videoRef = useRef<HTMLVideoElement>(null);
+L  45:   const canvasRef = useRef<HTMLCanvasElement>(null);
+L  46:   const [cameraOn, setCameraOn] = useState(false);
+L  47:   const [cameraError, setCameraError] = useState<string | null>(null);
+L  48:   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
+L  49:   const [saving, setSaving] = useState(false);
+L  50:   const [autoSaveFastMode, setAutoSaveFastMode] = useState(false);
+L  53:   const [overrideKelas, setOverrideKelas] = useState<string>(
+L  56:   const [overridePresensi, setOverridePresensi] = useState<string>('01');
+L  57:   const [overrideNama, setOverrideNama] = useState<string>('');
+L  59:   const [simStudentId, setSimStudentId] = useState<string>('');
+L  60:   const [simPreset, setSimPreset] = useState<'high' | 'mixed' | 'double'>('high');
+L  70:   const targetClassForStudents =
+L  72:   const classStudents = students.filter((s) => s.kelas === targetClassForStudents);
+L  73:   const availableStudents = classStudents.length > 0 ? classStudents : students;
+L  78:         const first = availableStudents[0];
+L  91:   async function startCamera() {
+L  94:       const stream = await navigator.mediaDevices.getUserMedia({
+L 101:       if (videoRef.current) {
+L 102:         videoRef.current.srcObject = stream;
+L 112:   function stopCamera() {
+L 113:     const stream = videoRef.current?.srcObject as MediaStream | null;
+L 118:   function advanceToNextPresensi(currentPresensi: string) {
+L 119:     const nextNum = (parseInt(currentPresensi, 10) || 1) + 1;
+L 120:     const nextPresensi = String(nextNum).padStart(2, '0');
+L 122:     const nextStudent = classStudents.find((s) => s.presensi === nextPresensi);
+L 131:   function applyClassAndStudentOverride(rawResult: ScanResult): ScanResult {
+L 132:     const chosenKelas =
+L 139:     const cleanPresensi =
+L 144:     const cleanNama =
+L 161:   async function processAndMaybeAutoSave(evaluated: ScanResult) {
+L 162:     const finalEvaluated = applyClassAndStudentOverride(evaluated);
+L 175:   async function handleCapture() {
+L 176:     const video = videoRef.current;
+L 177:     const canvas = canvasRef.current;
+L 178:     if (!video || !canvas) return;
+L 180:     const vw = video.videoWidth || 1050;
+L 181:     const vh = video.videoHeight || 742;
+L 182:     const targetRatio = 210 / 148.5;
+L 191:     const startX = (vw - cropW) / 2;
+L 192:     const startY = (vh - cropH) / 2;
+L 194:     canvas.width = 1050;
+L 195:     canvas.height = 742;
+L 196:     const ctx = canvas.getContext('2d')!;
+L 197:     ctx.drawImage(video, startX, startY, cropW, cropH, 0, 0, canvas.width, canvas.height);
+L 199:     const result = processCameraFrame(canvas, exam, students);
+L 203:   async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+L 204:     const file = e.target.files?.[0];
+L 205:     const canvas = canvasRef.current;
+L 206:     if (!file || !canvas) return;
+L 208:     const imgUrl = URL.createObjectURL(file);
+L 209:     const img = new Image();
+L 216:     canvas.width = 1050;
+L 217:     canvas.height = 742;
+L 218:     const ctx = canvas.getContext('2d')!;
+L 219:     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+L 222:     const result = processCameraFrame(canvas, exam, students);
+L 227:   async function handleSimulateScan() {
+L 228:     const canvas = canvasRef.current;
+L 229:     if (!canvas) return;
+L 230:     const selectedClass =
+L 232:     const foundStudent = availableStudents.find((s) => s.id === simStudentId);
+L 233:     const cleanPres = (overridePresensi || '01').padStart(2, '0');
+L 234:     const targetStudent: Student =
+L 245:     await renderFilledLJKToCanvas(canvas, exam, targetStudent, simPreset);
+L 246:     const result = processCameraFrame(
+L 247:       canvas,
+L 260:   async function handleConfirmSave() {
+L 264:       const finalResult: ScanResult = {
+L 278:   const ignoredCount = Math.max(0, DEFAULT_LJK_CAPACITY - exam.jumlahSoal);
+L 279:   const currentKelasLabel = activeKelas !== 'SEMUA' ? activeKelas : overrideKelas;
+L 280:   const classAvgScore =
+L 383:                         const stu = classStudents.find((s) => s.id === e.target.value);
+L 444:                     ref={videoRef}
+L 512:           <canvas ref={canvasRef} className="hidden" />
+L 637:                     const qNo = String(i + 1);
+L 638:                     const ans = lastResult.detailJawaban[qNo] || '-';
+L 639:                     const keyObj = exam.kunciJawaban[qNo];
+L 640:                     const expected = keyObj ? keyObj.answers.join('') : '-';
+L 641:                     const isExact = ans === expected;
+L 642:                     const isDoubt = ans === 'DOBEL';
+L 643:                     const isEmpty = ans === '-';
+
+
+```
+
+```python
+import re
+
+with open('extracted_app/src/App.tsx', 'r', encoding='utf-8', errors='replace') as f:
+    app_code = f.read()
+
+lines = app_code.splitlines()
+print(f"App.tsx total lines: {len(lines)}")
+
+# Find tab definitions and main views
+print("\n=== Tab / Navigation definitions ===")
+for i, line in enumerate(lines, 1):
+    if re.search(r'activeTab|setActiveTab|Tab\s*=|tabs\s*=|navigation|navItems|sidebar|menu', line, re.I):
+        if len(line.strip()) < 160:
+            print(f"L{i:4d}: {line.strip()}")
+
+
+```
+
+```text
+App.tsx total lines: 3523
+
+=== Tab / Navigation definitions ===
+L1397: {/* Zone 2: Clean single-line text navigation links */}
+L1402: tab === 'rekap'
+L1412: tab === 'ujian'
+L1422: tab === 'scan'
+L1436: tab === 'operator'
+L1573: if (tab === 'operator') setTab('rekap');
+L1607: tab === 'rekap' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+L1615: tab === 'ujian' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+L1623: tab === 'scan' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+L1635: tab === 'operator' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+L1672: {tab === 'operator' && isAdminLoggedIn && (
+L2336: {tab === 'ujian' && (
+L2726: {tab === 'scan' && (
+L2953: {tab === 'rekap' && (
+
+
+```
+
+```python
+import re
+
+with open('extracted_app/src/App.tsx', 'r', encoding='utf-8', errors='replace') as f:
+    lines = f.read().splitlines()
+
+print("=== All state hooks in App.tsx ===")
+for i, line in enumerate(lines, 1):
+    if 'useState' in line and ('tab' in line.lower() or 'mode' in line.lower() or 'view' in line.lower() or 'section' in line.lower() or 'panel' in line.lower() or 'step' in line.lower() or 'sub' in line.lower()):
+        print(f"L{i:4d}: {line.strip()}")
+
+print("\n=== Major UI section comments & headings in App.tsx ===")
+for i, line in enumerate(lines, 1):
+    s = line.strip()
+    if s.startswith('{/*') and len(s) < 120:
+        if any(k in s.lower() for k in ['tab', 'panel', 'section', 'header', 'nav', 'modal', 'operator', 'ujian', 'scan', 'rekap', 'kunci', 'ljk', 'siswa', 'guru', 'kelas', 'mapel', 'chart', 'analis']):
+            print(f"L{i:4d}: {s}")
+
+
+```
+
+```text
+=== All state hooks in App.tsx ===
+L 213: const [roleMode, setRoleMode] = useState<'guru' | 'operator'>(() => {
+L 216: const [tab, setTab] = useState<'operator' | 'ujian' | 'scan' | 'rekap'>(() => {
+L 231: const [dbSubjects, setDbSubjects] = useState<Subject[]>([]);
+L 270: const [editingSubjectId, setEditingSubjectId] = useState<string | null>(null);
+
+=== Major UI section comments & headings in App.tsx ===
+L1397: {/* Zone 2: Clean single-line text navigation links */}
+L1472: {/* Modal Login Admin (sahidin30@gmail.com / 123456) */}
+L1551: {/* Main Content Container aligned flush with Header (max-w-5xl) */}
+L1598: {/* Mobile Tab Switcher */}
+L1674: {/* Section 1: MANAJEMEN DAFTAR MATA PELAJARAN & JENJANG KELAS 10, 11, 12 */}
+L1715: {/* Form Tambah Mapel Baru + Pilihan Jenjang Kelas 10, 11, 12 & Pencarian */}
+L1767: {/* Tabel Daftar Mapel dengan Kolom Jenjang Kelas 10/11/12 serta Fitur Edit & Hapus */}
+L1894: {/* Section 2: Cetak LJK Massal Hemat Kertas Per Kelas (1 Halaman A4 = 2 Siswa, Default 40 Soal) */}
+L1913: {/* Form Pilih Kelas, Jenjang & Mapel */}
+L1915: {/* Tombol Cepat Pilih Kelas Cetak LJK */}
+L2070: {/* Visualisasi Tata Letak 1 Halaman A4 = 2 LJK Siswa Berwarna & Anti-Tabrakan */}
+L2080: {/* Preview LJK 1 */}
+L2120: {/* Preview LJK 2 */}
+L2156: {/* Section 3: Master Data Siswa & Kelas */}
+L2232: {/* Tabel Database Induk Siswa */}
+L2338: {/* Left Column: Guru Input Soal, Kelas & Kunci */}
+L2359: {/* 1. Pilihan Cepat Kelas (Kelas 10, 11, 12 atau Ketik Rombel) */}
+L2507: {/* Opsi A: Upload Excel Kunci */}
+L2557: {/* Right Column: Daftar Kunci Mapel & Cetak LJK 2-in-1 Sesuai Kelas */}
+L2680: {/* Rincian Kunci Jawaban Paket Terpilih */}
+L2753: {/* Langkah 1: Pilih Kelas Scan */}
+L2790: {/* Langkah 2: Pilih Paket Kunci Soal / Mapel */}
+L2955: {/* Top Filter Kelas, Mapel & Export Bar */}
+L3021: {/* Tombol Cepat Filter Per Kelas */}
+L3099: {/* Tabel Ringkasan Rekap Per Kelas (Kelas 10, Kelas 11, Kelas 12, dst.) */}
+L3180: {/* Tabel Hasil LJK Siswa + Panel Rapor LJK Individual */}
+L3327: {/* Kartu Rapor Detail Hasil LJK Siswa Terpilih */}
+L3451: {/* Analisis Ketepatan Per Butir Soal */}
+
+
+```
+
+```python
+with open('extracted_app/src/App.tsx', 'r', encoding='utf-8', errors='replace') as f:
+    lines = f.read().splitlines()
+
+print("=== HEADER & NAV (L1385 - L1470) ===")
+for i in range(1385, 1470):
+    print(f"L{i+1:4d}: {lines[i]}")
+
+print("\n=== SCAN TAB WRAPPER (L2725 - L2830) ===")
+for i in range(2725, 2830):
+    print(f"L{i+1:4d}: {lines[i]}")
+
+
+```
+
+```text
+=== HEADER & NAV (L1385 - L1470) ===
+L1386:           <a
+L1387:             href="#top"
+L1388:             onClick={(e) => {
+L1389:               e.preventDefault();
+L1390:               setTab(isAdminLoggedIn && roleMode === 'operator' ? 'operator' : 'rekap');
+L1391:             }}
+L1392:             className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+L1393:           >
+L1394:             EvalScan LJK
+L1395:           </a>
+L1396: 
+L1397:           {/* Zone 2: Clean single-line text navigation links */}
+L1398:           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+L1399:             <button
+L1400:               onClick={() => setTab('rekap')}
+L1401:               className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
+L1402:                 tab === 'rekap'
+L1403:                   ? 'border-blue-600 text-slate-900 font-semibold'
+L1404:                   : 'border-transparent'
+L1405:               }`}
+L1406:             >
+L1407:               1. Hasil Ujian &amp; Rekap Kelas
+L1408:             </button>
+L1409:             <button
+L1410:               onClick={() => setTab('ujian')}
+L1411:               className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
+L1412:                 tab === 'ujian'
+L1413:                   ? 'border-blue-600 text-slate-900 font-semibold'
+L1414:                   : 'border-transparent'
+L1415:               }`}
+L1416:             >
+L1417:               2. Kunci Soal &amp; Cetak LJK
+L1418:             </button>
+L1419:             <button
+L1420:               onClick={() => setTab('scan')}
+L1421:               className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
+L1422:                 tab === 'scan'
+L1423:                   ? 'border-blue-600 text-slate-900 font-semibold'
+L1424:                   : 'border-transparent'
+L1425:               }`}
+L1426:             >
+L1427:               3. Scan Kamera HP
+L1428:             </button>
+L1429:             {isAdminLoggedIn && (
+L1430:               <button
+L1431:                 onClick={() => {
+L1432:                   setRoleMode('operator');
+L1433:                   setTab('operator');
+L1434:                 }}
+L1435:                 className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
+L1436:                   tab === 'operator'
+L1437:                     ? 'border-slate-900 text-slate-900 font-semibold'
+L1438:                     : 'border-transparent'
+L1439:                 }`}
+L1440:               >
+L1441:                 4. Panel Admin &amp; Mapel
+L1442:               </button>
+L1443:             )}
+L1444:           </nav>
+L1445: 
+L1446:           {/* Zone 3: 1 primary action (Login Admin / Keluar Admin) */}
+L1447:           <div className="flex items-center gap-3 shrink-0">
+L1448:             {isAdminLoggedIn ? (
+L1449:               <button
+L1450:                 onClick={handleAdminLogout}
+L1451:                 className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+L1452:               >
+L1453:                 <LogOut className="w-3.5 h-3.5 shrink-0" />
+L1454:                 Keluar Admin ({ADMIN_EMAIL.split('@')[0]})
+L1455:               </button>
+L1456:             ) : (
+L1457:               <button
+L1458:                 onClick={() => {
+L1459:                   setAdminLoginError('');
+L1460:                   setShowAdminLoginModal(true);
+L1461:                 }}
+L1462:                 className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+L1463:               >
+L1464:                 <LogIn className="w-3.5 h-3.5 shrink-0" />
+L1465:                 Login Admin
+L1466:               </button>
+L1467:             )}
+L1468:           </div>
+L1469:         </header>
+L1470:       </div>
+
+=== SCAN TAB WRAPPER (L2725 - L2830) ===
+L2726:         {tab === 'scan' && (
+L2727:           <div className="space-y-5">
+L2728:             <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+L2729:               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3.5">
+L2730:                 <div className="min-w-0">
+L2731:                   <h2 className="text-base font-bold text-slate-900">
+L2732:                     Pemindai LJK Kamera HP · Pilih Kelas &amp; Kunci Mata Pelajaran
+L2733:                   </h2>
+L2734:                   <p className="text-xs text-slate-500 mt-0.5">
+L2735:                     Pilih kelas terlebih dahulu agar setiap lembar LJK yang dipindai otomatis tersusun rapi ke dalam rekap kelas &amp; file Excel
+L2736:                   </p>
+L2737:                 </div>
+L2738: 
+L2739:                 {selectedExam && (
+L2740:                   <div className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
+L2741:                     <span>
+L2742:                       Kelas Aktif: <strong className="text-slate-900">{scanKelasFilter}</strong>
+L2743:                     </span>
+L2744:                     <span aria-hidden="true">·</span>
+L2745:                     <span className="font-mono tabular-nums">
+L2746:                       {pendingSyncCount > 0 ? 'Menyimpan Bundel...' : 'Tersinkron Real-Time'}
+L2747:                     </span>
+L2748:                   </div>
+L2749:                 )}
+L2750:               </div>
+L2751: 
+L2752:               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+L2753:                 {/* Langkah 1: Pilih Kelas Scan */}
+L2754:                 <div className="lg:col-span-7 space-y-1.5">
+L2755:                   <label className="block text-xs font-semibold text-slate-700">
+L2756:                     1. Pilih Kelas yang Sedang Dipindai
+L2757:                   </label>
+L2758:                   <div className="flex flex-wrap gap-1.5">
+L2759:                     {allClassOptions.map((kls) => {
+L2760:                       const classScanCount = results.filter(
+L2761:                         (r) =>
+L2762:                           r.kelas === kls &&
+L2763:                           (!selectedExam || r.examId === selectedExam.id)
+L2764:                       ).length;
+L2765:                       return (
+L2766:                         <button
+L2767:                           key={kls}
+L2768:                           type="button"
+L2769:                           onClick={() => {
+L2770:                             setScanKelasFilter(kls);
+L2771:                             const matchingExam = exams.find((e) => e.kelas === kls);
+L2772:                             if (matchingExam) {
+L2773:                               setSelectedExamId(matchingExam.id);
+L2774:                             }
+L2775:                           }}
+L2776:                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
+L2777:                             scanKelasFilter === kls
+L2778:                               ? 'bg-blue-600 border-blue-600 text-white'
+L2779:                               : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+L2780:                           }`}
+L2781:                         >
+L2782:                           {kls}
+L2783:                           {classScanCount > 0 ? ` (${classScanCount})` : ''}
+L2784:                         </button>
+L2785:                       );
+L2786:                     })}
+L2787:                   </div>
+L2788:                 </div>
+L2789: 
+L2790:                 {/* Langkah 2: Pilih Paket Kunci Soal / Mapel */}
+L2791:                 <div className="lg:col-span-5 space-y-1.5">
+L2792:                   <label className="block text-xs font-semibold text-slate-700">
+L2793:                     2. Pilih Kunci Mata Pelajaran Aktif
+L2794:                   </label>
+L2795:                   {exams.length > 0 ? (
+L2796:                     <select
+L2797:                       className="w-full border border-slate-300 bg-white px-3 py-2 rounded-lg text-xs sm:text-sm font-semibold text-slate-900 truncate"
+L2798:                       value={selectedExam?.id || ''}
+L2799:                       onChange={(e) => {
+L2800:                         setSelectedExamId(e.target.value);
+L2801:                         const found = exams.find((ex) => ex.id === e.target.value);
+L2802:                         if (found?.kelas) setScanKelasFilter(found.kelas);
+L2803:                       }}
+L2804:                     >
+L2805:                       {exams.map((ex) => (
+L2806:                         <option key={ex.id} value={ex.id}>
+L2807:                           {ex.mapel} — Kunci {ex.kelas} ({ex.jumlahSoal} dari 40 Soal)
+L2808:                         </option>
+L2809:                       ))}
+L2810:                     </select>
+L2811:                   ) : (
+L2812:                     <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+L2813:                       Belum ada kunci soal. Silakan buat kunci soal di tab 2 terlebih dahulu.
+L2814:                     </div>
+L2815:                   )}
+L2816:                 </div>
+L2817:               </div>
+L2818:             </div>
+L2819: 
+L2820:             {selectedExam ? (
+L2821:               <CameraScanner
+L2822:                 exam={selectedExam}
+L2823:                 activeKelas={scanKelasFilter}
+L2824:                 classOptions={allClassOptions}
+L2825:                 onChangeActiveKelas={(kls) => setScanKelasFilter(kls)}
+L2826:                 students={students}
+L2827:                 classResults={results.filter(
+L2828:                   (r) =>
+L2829:                     r.kelas === (scanKelasFilter || selectedExam.kelas) &&
+L2830:                     (r.examId === selectedExam.id || r.mapel === selectedExam.mapel)
+
+
+```
+
+```python
+with open('extracted_app/src/components/CameraScanner.tsx', 'r', encoding='utf-8', errors='replace') as f:
+    lines = f.read().splitlines()
+
+for i, line in enumerate(lines, 1):
+    s = line.strip()
+    if s.startswith('{/*') or ('<h' in s and '>' in s):
+        print(f"L{i:4d}: {s[:110]}")
+
+
+```
+
+```text
+L 292: {/* Main 2-Column Scanner & Verification Split */}
+L 294: {/* Left Column: Kamera / Upload / Target Siswa */}
+L 297: {/* Header Panel Kamera */}
+L 300: <h3 className="text-base font-bold text-slate-900 truncate">
+L 323: {/* Form Ringkas Target Kelas & Identitas Siswa */}
+L 418: {/* Area Viewfinder Kamera / Placeholder */}
+L 481: {/* Baris Bawah: Uji Coba / Simulasi Cepat LJK */}
+L 515: {/* Right Column: Hasil Koreksi LJK & Verifikasi Jawaban */}
+L 519: <h3 className="text-base font-bold text-slate-900">
+L 544: {/* Ringkasan Skor & Identitas Siswa */}
+L 571: {/* Koreksi Cepat Identitas sebelum Simpan */}
+L 613: {/* Bukti Citra LJK Setengah A4 */}
+L 625: {/* Peta Jawaban Siswa vs Kunci Guru */}
+L 698: {/* Live Rekapitulasi Kelas Saat Ini (Langsung Muncul di Halaman Scan & Siap Download Excel) */}
+L 702: <h3 className="text-sm font-bold text-slate-900">
+
+
+```
+
+Dari hasil bedah kode di arsip **EvalScan LJK** (`src/lib/omrCameraEngine.ts`, `src/components/CameraScanner.tsx`, `src/lib/ljkLayout.ts`, dan `src/App.tsx`), ada dua akar masalah utama yang membuat pengalaman scan belum seperti EvalBee dan tampilannya terasa penuh.
+
+---
+
+## 1. Mengapa Sistem Scan Belum Seperti EvalBee
+
+Secara teknis, kertas LJK Anda sebenarnya sudah punya modal yang tepat (`HALF_ANCHORS` berupa 4 kotak hitam sudut di `ljkLayout.ts` dan QR Code identitas siswa), tetapi mesin pembaca kameranya belum memanfaatkannya:
+
+* **Belum ada deteksi 4 titik sudut (*anchor*) & pelurusan perspektif (*homography*):** Di `CameraScanner.tsx` (`handleCapture`), frame kamera hanya dipotong di tengah (*center crop*) lalu direntangkan ke kanvas `1050 × 742`. Di `omrCameraEngine.ts` (`processCameraFrame`), sistem langsung membaca koordinat piksel statis (`pos.x * scaleX, pos.y * scaleY`). Akibatnya, jika HP agak miring, terlalu dekat/jauh 1–2 cm, atau kertas sedikit bergeser, titik pembacaan bulatan langsung meleset.
+
+
+* **Belum ada *auto-lock* & *auto-capture* real-time:** EvalBee terus memindai video secara real-time, mengubah 4 kotak sudut menjadi hijau saat kertas stabil, lalu otomatis memotret dengan bunyi *beep*/getar. Di kode saat ini, guru masih harus mengepaskan bingkai secara manual dan menekan tombol jepret sendiri.
+
+
+* **Sensitif terhadap bayangan & cahaya:** Fungsi `getBubbleBrightness()` mengambil rata-rata RGB di area kotak (`cx - r` s.d. `cx + r`) lalu memakai ambang batas tunggal per baris (`paperAvg * 0.72`). Jika sebagian LJK terkena bayangan HP/tangan, bulatan kosong di sisi gelap mudah terbaca terisi, dan tepi garis lingkaran yang ikut masuk kotak sampel bisa mengacaukan skor kegelapan.
+
+
+* **Belum ada kontrol *Flash/Torch* & koreksi ketuk bulatan:** Saat ruangan agak redup, belum ada tombol lampu flash kamera dan belum ada fitur klik langsung pada bulatan di gambar hasil scan jika ada 1 nomor yang ragu.
+
+
+
+### Perbaikan Engine OMR yang Diperlukan
+
+1. **Deteksi 4 Anchor Real-Time:** Jalankan loop `requestAnimationFrame` (resolusi ringan ~480p agar mulus di HP) untuk mencari 4 kotak hitam sudut (`tl, tr, bl, br`) memakai *adaptive threshold* + deteksi blok gelap di 4 kuadran.
+2. **Perspective Warp (Homography 4-Titik):** Begitu 4 anchor terkunci stabil (~300 ms), lakukan transformasi perspektif 4 titik ke kanvas standar `1050 × 742` sebelum memanggil `jsQR` dan pembacaan bulatan. Dengan ini, posisi kertas miring atau jarak kamera yang berubah-ubah tidak lagi menggeser koordinat.
+3. **Pembacaan Bulatan Tahan Bayangan:** Sampling hanya di bagian dalam lingkaran (`radius * 0.55` agar garis tepi lingkaran tidak ikut terhitung) dan bandingkan dengan tingkat kecerahan kertas lokal di sekitar tiap bulatan, bukan hanya rata-rata satu baris.
+4. **Feedback Instan ala EvalBee:** Indikator 4 sudut berubah merah → hijau → *auto-capture* → bunyi *beep* + getar (`navigator.vibrate(80)`), disertai tombol toggle **Flash**.
+
+---
+
+## 2. Mengapa Tampilan Terasa Penuh & Terlalu Banyak Tab
+
+Saat ini seluruh aplikasi bertumpuk di satu file **`src/App.tsx` (3.523 baris)** dengan 4 tab utama yang masing-masing memuat banyak blok sekaligus, bahkan beberapa fitur muncul ganda:
+
+* **Halaman Scan tercampur dengan hal non-scan:** Di tab `3. Scan Kamera HP`, sebelum melihat kamera, pengguna disuguhi deretan tombol pilih kelas (jika ada 22 kelas, ini langsung memenuhi layar HP). Di dalam `CameraScanner.tsx` (791 baris), layar kamera masih dicampur dengan form *override* identitas manual, kotak **Uji Coba/Simulasi**, peta 40 jawaban, hingga tabel **Live Rekapitulasi Kelas + Download Excel** di bagian bawah.
+
+
+* **Duplikasi menu antar tab:**
+* Fitur **Cetak LJK** ada di dua tempat: tab `2. Kunci Soal & Cetak LJK` dan tab `4. Panel Admin & Mapel`.
+
+
+* Fitur **Rekap & Download Excel** ada di dua tempat: tab `1. Hasil Ujian & Rekap Kelas` dan di bawah halaman `3. Scan Kamera HP`.
+
+
+* Deretan tombol filter kelas berulang di 3 tab berbeda, yang akan semakin padat seiring bertambahnya rombel.
+
+
+
+
+
+---
+
+## 3. Rancangan Arsitektur UI Baru (Lebih Ringkas & Terpisah)
+
+Agar alur kerjanya persis seperti EvalBee—cepat saat scan di HP, rapi saat rekap di laptop—pisahkan navigasi utama menjadi **3 menu inti** dan jadikan **Scanner sebagai layar penuh terpisah (*fullscreen overlay*)**:
+
+| Area / Menu | Isi & Fungsi Utama | Yang Dihilangkan / Dipindah |
+| --- | --- | --- |
+| **1. Ujian** *(Beranda)* | Daftar kartu paket ujian (Mapel, Kelas, Jumlah Soal, progres scan mis. `18/32`). Klik 1 ujian untuk: **Edit Kunci**, **Cetak LJK**, atau tombol utama **Mulai Scan**. | Form input kunci & cetak LJK tidak lagi ditumpuk terbuka semua di satu halaman panjang; cukup dibuka via modal/halaman detail paket ujian. |
+| **2. Rekap & Analisis** | Khusus melihat tabel nilai per kelas, rapor detail per siswa, analisis ketepatan butir soal, dan tombol **Export Excel**. Filter kelas pakai *dropdown* ringkas (bukan 22 tombol *pill*). | Terpisah total dari layar kamera; tidak lagi muncul di bawah viewfinder scan. |
+| **3. Master Data** *(Admin)* | Khusus pengelolaan Data Siswa (import Excel), Daftar Kelas, dan Daftar Mapel. | Hapus duplikasi section Cetak LJK dari panel admin agar tidak membingungkan. |
+| **Mode Scan** *(Fullscreen Terpisah)* | Terbuka penuh tanpa navbar/header saat guru menekan **Mulai Scan**: 80% layar adalah kamera + bingkai 4 sudut, *top bar* tipis (Info Ujian, dropdown kelas, counter scan, tombol Flash & Tutup). Setelah jepret, muncul *bottom sheet* ringkas (Skor, Nama dari QR, foto hasil koreksi, tombol **Simpan & Lanjut**). | Hapus tabel rekap, hapus deretan 22 tombol kelas, dan sembunyikan fitur **Simulasi** ke dalam menu kecil (`⋯`) agar layar scan bersih 100%. |
+
+Dari sisi kode, `src/App.tsx` juga perlu dipecah menjadi beberapa modul (`ExamPage.tsx`, `ScannerFullscreen.tsx`, `RecapPage.tsx`, `MasterDataPage.tsx`, dan `omrPerspective.ts`) supaya ringan saat dijalankan di browser HP dan jauh lebih mudah dikembangkan.
+
+---
+
+Apakah Anda ingin saya langsung mengeksekusi perbaikan ini pada proyek Anda (memecah `App.tsx`, memisahkan layar Scan fullscreen dari Rekap, dan menambahkan *anchor detection* + *perspective warp* otomatis ke `omrCameraEngine.ts`) lalu mengemasnya kembali menjadi file `.zip` siap pakai?

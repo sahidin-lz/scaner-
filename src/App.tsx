@@ -17,6 +17,8 @@ import {
   LogIn,
   LogOut,
   ScanLine,
+  FileText,
+  BarChart3,
   X,
   ShieldCheck,
   GraduationCap,
@@ -1439,43 +1441,40 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content Container */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6 space-y-5">
-        {/* Role & Quick Fullscreen Scan Banner */}
-        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1 min-w-0">
-            <div className="flex items-center gap-2 text-xs font-semibold text-blue-600">
-              <span>
-                {roleMode === 'guru'
-                  ? 'Mode Guru Aktif (Tanpa Perlu Login)'
-                  : `Mode Admin Aktif (${ADMIN_EMAIL})`}
+      {/* Main Content Container (Compact padding on mobile + bottom clearance for mobile thumb-zone nav) */}
+      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 pt-3 pb-24 md:py-5 space-y-4">
+        {/* Compact Status & Quick Action Bar */}
+        <div className="bg-white border border-slate-200 rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-600">
+              <span className="truncate">
+                {roleMode === 'guru' ? 'Mode Guru (Tanpa Login)' : 'Mode Admin'}
               </span>
               <span aria-hidden="true">·</span>
               <span className="font-mono tabular-nums text-slate-500">
-                {pendingSyncCount > 0 ? 'Menyimpan Bundel...' : 'Real-Time Bundel Hemat 97% Kuota'}
+                {pendingSyncCount > 0 ? 'Sinkronisasi...' : 'Hemat 97% Kuota'}
               </span>
             </div>
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+            <h1 className="text-sm sm:text-lg font-bold text-slate-900 truncate">
               {tab === 'ujian'
-                ? 'Beranda Paket Ujian, Kunci Soal & Cetak LJK 2-in-1'
+                ? 'Paket Ujian, Kunci Soal & Cetak LJK'
                 : tab === 'rekap'
-                ? 'Rekapitulasi Nilai, Rapor Siswa & Analisis Butir Soal'
-                : 'Master Data Mata Pelajaran (Kelas 10/11/12) & Database Siswa'}
+                ? 'Rekap Nilai, Rapor & Analisis Soal'
+                : 'Master Mata Pelajaran & Siswa'}
             </h1>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {/* Tombol Utama Buka Fullscreen Scanner ala EvalBee */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => openFullscreenScannerForExam(selectedExam, scanKelasFilter)}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap min-h-[40px]"
             >
               <ScanLine className="w-4 h-4 shrink-0" />
-              Mulai Scan Fullscreen
+              <span>Mulai Scan</span>
             </button>
 
-            <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-xl">
+            <div className="hidden sm:flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-xl">
               <button
                 type="button"
                 onClick={() => {
@@ -1501,63 +1500,16 @@ export default function App() {
                 }`}
               >
                 <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                {isAdminLoggedIn ? 'Master Data' : 'Admin'}
+                {isAdminLoggedIn ? 'Master' : 'Admin'}
               </button>
             </div>
           </div>
         </div>
 
-        {/* Mobile Tab Switcher (3 Menu Inti + Scan Fullscreen) */}
-        <div
-          className={`grid ${
-            isAdminLoggedIn ? 'grid-cols-4' : 'grid-cols-3'
-          } gap-1.5 p-1 bg-slate-200/70 rounded-xl md:hidden text-xs`}
-        >
-          <button
-            type="button"
-            onClick={() => setTab('ujian')}
-            className={`py-2 px-2 rounded-lg font-semibold whitespace-nowrap truncate transition-colors ${
-              tab === 'ujian' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-            }`}
-          >
-            1. Ujian &amp; LJK
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab('rekap')}
-            className={`py-2 px-2 rounded-lg font-semibold whitespace-nowrap truncate transition-colors ${
-              tab === 'rekap' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-            }`}
-          >
-            2. Rekap Nilai
-          </button>
-          <button
-            type="button"
-            onClick={() => openFullscreenScannerForExam(selectedExam, scanKelasFilter)}
-            className="py-2 px-2 rounded-lg font-bold whitespace-nowrap truncate bg-blue-600 text-white"
-          >
-            Scan LJK
-          </button>
-          {isAdminLoggedIn && (
-            <button
-              type="button"
-              onClick={() => {
-                setRoleMode('operator');
-                setTab('master');
-              }}
-              className={`py-2 px-2 rounded-lg font-semibold whitespace-nowrap truncate transition-colors ${
-                tab === 'master' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-              }`}
-            >
-              3. Master
-            </button>
-          )}
-        </div>
-
         {/* Notification Toast Banner */}
         {banner && (
           <div
-            className={`p-3.5 rounded-xl border text-xs sm:text-sm font-medium flex items-center justify-between gap-3 ${
+            className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between gap-3 ${
               banner.type === 'success'
                 ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
                 : 'bg-amber-50 border-amber-200 text-amber-900'
@@ -1710,6 +1662,60 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Fixed Bottom Thumb-Zone Navigation Bar for Mobile Screen (md:hidden) */}
+      <nav
+        className={`fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid ${
+          isAdminLoggedIn ? 'grid-cols-4' : 'grid-cols-3'
+        } items-center h-16 md:hidden px-2`}
+      >
+        <button
+          type="button"
+          onClick={() => setTab('ujian')}
+          className={`flex flex-col items-center justify-center min-h-[44px] rounded-xl transition-colors cursor-pointer ${
+            tab === 'ujian' ? 'text-blue-600 font-bold' : 'text-slate-500'
+          }`}
+        >
+          <FileText className="w-5 h-5" />
+          <span className="text-[10px] tracking-tight mt-0.5">Ujian &amp; LJK</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => openFullscreenScannerForExam(selectedExam, scanKelasFilter)}
+          className="flex flex-col items-center justify-center min-h-[44px] rounded-xl text-blue-600 font-bold cursor-pointer"
+        >
+          <ScanLine className="w-5 h-5" />
+          <span className="text-[10px] tracking-tight mt-0.5">Scan Kamera</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setTab('rekap')}
+          className={`flex flex-col items-center justify-center min-h-[44px] rounded-xl transition-colors cursor-pointer ${
+            tab === 'rekap' ? 'text-blue-600 font-bold' : 'text-slate-500'
+          }`}
+        >
+          <BarChart3 className="w-5 h-5" />
+          <span className="text-[10px] tracking-tight mt-0.5">Rekap Nilai</span>
+        </button>
+
+        {isAdminLoggedIn && (
+          <button
+            type="button"
+            onClick={() => {
+              setRoleMode('operator');
+              setTab('master');
+            }}
+            className={`flex flex-col items-center justify-center min-h-[44px] rounded-xl transition-colors cursor-pointer ${
+              tab === 'master' ? 'text-slate-900 font-bold' : 'text-slate-500'
+            }`}
+          >
+            <ShieldCheck className="w-5 h-5" />
+            <span className="text-[10px] tracking-tight mt-0.5">Master Data</span>
+          </button>
+        )}
+      </nav>
 
       {/* FULLSCREEN SCANNER OVERLAY ALA EVALBEE (TERPISAH DARI NAVBAR & REKAP) */}
       {scannerFullscreenOpen && selectedExam && (

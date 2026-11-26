@@ -8,18 +8,21 @@ import {
   RotateCcw,
   AlertTriangle,
   Sun,
+  PauseCircle,
 } from 'lucide-react';
 import { Exam, Student } from '../lib/ljkGenerator';
 import { OPTIONS } from '../lib/ljkLayout';
 import {
   processCameraFrame,
-  detectFourAnchors,
+  probeLiveFrame,
   recalculateResultWithManualAnswers,
   ScanResult,
 } from '../lib/omrCameraEngine';
 
 interface Props {
   exam: Exam;
+  exams?: Exam[];
+  onSelectExamId?: (id: string) => void;
   activeKelas: string;
   classOptions: string[];
   onChangeActiveKelas: (kls: string) => void;
@@ -31,6 +34,8 @@ interface Props {
 
 export default function CameraScanner({
   exam,
+  exams = [],
+  onSelectExamId,
   activeKelas,
   classOptions,
   onChangeActiveKelas,
@@ -42,7 +47,10 @@ export default function CameraScanner({
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const probeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const cooldownUntilRef = useRef<number>(0);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraStarting, setCameraStarting] = useState(true);
@@ -50,14 +58,25 @@ export default function CameraScanner({
   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Real-time 4-anchor detection & auto-capture state (Ringan di HP)
+  // Mode Otomatis di HP: Auto-Jepret & Auto-Simpan Beruntun
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(true);
+  const [autoSavePaused, setAutoSavePaused] = useState(false);
+  const [recentSavedToast, setRecentSavedToast] = useState<{
+    nama: string;
+    presensi: string;
+    skor: number;
+    benar: number;
+  } | null>(null);
+
   const [cornerStatus, setCornerStatus] = useState({
     tl: false,
     tr: false,
     bl: false,
     br: false,
     allLocked: false,
+    qrDetected: false,
+    lockedCount: 0,
   });
 
   // Torch / Flash support
@@ -105,7 +124,13 @@ export default function CameraScanner({
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (AudioCtx) {
-        const ctx = new AudioCtx();
+        if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+          audioCtxRef.current = new AudioCtx();
+        }
+        const ctx = audioCtxRef.current;
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
@@ -142,7 +167,7 @@ export default function CameraScanner({
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setCameraStarting(false);
       setCameraError(
-        'Browser ini tidak mendukung akses kamera langsung. Gunakan tombol Upload Foto / Kamera Sistem di bawah.'
+        'Browser ini membatasi live stream kamera. Gunakan tombol Kamera HP / Ambil Foto di bawah.'
       );
       return;
     }
@@ -171,8 +196,16 @@ export default function CameraScanner({
     let acquiredStream: MediaStream | null = null;
     for (const constraints of constraintCandidates) {
       try {
-        acquiredStream = await navigator.mediaDevices.getUserMedia(constraints);
-        if (acquiredStream) break;
+        // Guard dengan timeout 3.5 detik agar tidak pernah stuck di WebView / browser HP
+        const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
+        const timeoutPromise = new Promise<null>((resolve) =>
+          window.setTimeout(() => resolve(null), 3500)
+        );
+        const res = await Promise.race([streamPromise, timeoutPromise]);
+        if (res) {
+          acquiredStream = res;
+          break;
+        }
       } catch {
         // Coba fallback constraint berikutnya
       }
@@ -181,7 +214,7 @@ export default function CameraScanner({
     if (!acquiredStream) {
       setCameraStarting(false);
       setCameraError(
-        'Izin kamera belum aktif atau kamera tidak ditemukan. Klik Coba Buka Kamera Lagi atau gunakan tombol Ambil Foto Kamera HP di bawah.'
+        'Izin kamera live belum aktif di browser HP ini. Izinkan akses kamera lalu klik Coba Buka Kamera Lagi, atau langsung tekan tombol Kamera HP / Foto di bawah.'
       );
       return;
     }
@@ -192,10 +225,12 @@ export default function CameraScanner({
 
     if (videoRef.current) {
       videoRef.current.srcObject = acquiredStream;
+      videoRef.current.setAttribute('playsinline', 'true');
+      videoRef.current.setAttribute('webkit-playsinline', 'true');
       try {
         await videoRef.current.play();
       } catch {
-        // AutoPlay ditangani oleh atribut autoPlay + playsInline
+        // AutoPlay ditangani oleh useEffect & onLoadedMetadata setelah render
       }
     }
 
@@ -212,12 +247,16 @@ export default function CameraScanner({
     }
   }, [stopCamera]);
 
-  // Pastikan stream terpasang ke elemen <video> begitu videoRef siap di DOM
+  // Pastikan stream terpasang & diputar begitu elemen <video> tampil penuh di layar HP
   useEffect(() => {
     const videoEl = videoRef.current;
-    if (videoEl && streamRef.current && videoEl.srcObject !== streamRef.current) {
-      videoEl.srcObject = streamRef.current;
-      videoEl.play().catch(() => {});
+    if (videoEl && streamRef.current) {
+      if (videoEl.srcObject !== streamRef.current) {
+        videoEl.srcObject = streamRef.current;
+      }
+      if (videoEl.paused) {
+        videoEl.play().catch(() => {});
+      }
     }
   }, [cameraOn, lastResult]);
 
@@ -241,17 +280,20 @@ export default function CameraScanner({
     }
   }
 
-  function advanceToNextPresensi(currentPresensi: string) {
-    const nextNum = (parseInt(currentPresensi, 10) || 1) + 1;
-    const nextPresensi = String(nextNum).padStart(2, '0');
-    setOverridePresensi(nextPresensi);
-    const nextStudent = classStudents.find((s) => s.presensi === nextPresensi);
-    if (nextStudent) {
-      setOverrideNama(nextStudent.nama);
-    } else {
-      setOverrideNama(`Peserta ${targetClassForStudents} - No. ${nextPresensi}`);
-    }
-  }
+  const advanceToNextPresensi = useCallback(
+    (currentPresensi: string) => {
+      const nextNum = (parseInt(currentPresensi, 10) || 1) + 1;
+      const nextPresensi = String(nextNum).padStart(2, '0');
+      setOverridePresensi(nextPresensi);
+      const nextStudent = classStudents.find((s) => s.presensi === nextPresensi);
+      if (nextStudent) {
+        setOverrideNama(nextStudent.nama);
+      } else {
+        setOverrideNama(`Peserta ${targetClassForStudents} - No. ${nextPresensi}`);
+      }
+    },
+    [classStudents, targetClassForStudents]
+  );
 
   const applyClassAndStudentOverride = useCallback(
     (rawResult: ScanResult): ScanResult => {
@@ -295,8 +337,14 @@ export default function CameraScanner({
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
-    const vw = video.videoWidth || 1050;
-    const vh = video.videoHeight || 742;
+    // Jika kamera live belum mengeluarkan frame di browser HP, otomatis buka kamera sistem HP
+    if (!cameraOn || video.videoWidth === 0 || video.videoHeight === 0) {
+      nativeCameraInputRef.current?.click();
+      return;
+    }
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
     const targetRatio = 210 / 148.5;
 
     let cropW = vw;
@@ -317,19 +365,75 @@ export default function CameraScanner({
     const result = processCameraFrame(canvas, exam, students);
     triggerScanFeedback();
     setEditingQuestionNo(null);
+    setAutoSavePaused(false);
     setLastResult(applyClassAndStudentOverride(result));
-  }, [applyClassAndStudentOverride, exam, students, triggerScanFeedback]);
+  }, [applyClassAndStudentOverride, cameraOn, exam, students, triggerScanFeedback]);
 
-  // Loop Real-Time 4-Anchor Detection Ringan (Resolusi 320x226 tiap 160ms agar hemat CPU & baterai HP)
+  const handleConfirmSave = useCallback(async () => {
+    if (!lastResult || saving) return;
+    setSaving(true);
+    try {
+      const finalResult: ScanResult = {
+        ...lastResult,
+        kelas: (overrideKelas || lastResult.kelas || exam.kelas || 'Kelas 10').trim(),
+        presensi: (overridePresensi || lastResult.presensi || '01').trim(),
+        nama: (overrideNama || lastResult.nama || 'Siswa').trim(),
+      };
+      await onResultSaved(finalResult);
+      setRecentSavedToast({
+        nama: finalResult.nama,
+        presensi: finalResult.presensi,
+        skor: finalResult.skor,
+        benar: finalResult.benar,
+      });
+      // Beri jeda 1.8 detik sebelum auto-jepret lembar berikutnya agar guru sempat mengganti kertas LJK
+      cooldownUntilRef.current = performance.now() + 1800;
+      setLastResult(null);
+      setEditingQuestionNo(null);
+      setAutoSavePaused(false);
+      advanceToNextPresensi(finalResult.presensi);
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    advanceToNextPresensi,
+    exam.kelas,
+    lastResult,
+    onResultSaved,
+    overrideKelas,
+    overrideNama,
+    overridePresensi,
+    saving,
+  ]);
+
+  // Otomatis simpan hasil scan setelah 1.3 detik jika mode Auto-Simpan aktif dan tidak sedang diedit manual
+  useEffect(() => {
+    if (!lastResult || !autoSaveEnabled || autoSavePaused || editingQuestionNo || saving) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      handleConfirmSave();
+    }, 1300);
+    return () => window.clearTimeout(timer);
+  }, [autoSaveEnabled, autoSavePaused, editingQuestionNo, handleConfirmSave, lastResult, saving]);
+
+  // Bersihkan notifikasi toast otomatis setelah 3.5 detik
+  useEffect(() => {
+    if (!recentSavedToast) return;
+    const t = window.setTimeout(() => setRecentSavedToast(null), 3500);
+    return () => window.clearTimeout(t);
+  }, [recentSavedToast]);
+
+  // Loop Real-Time Deteksi LJK di HP (4 Sudut + QR Code pada resolusi 420x297 tiap 140ms)
   useEffect(() => {
     if (!cameraOn || lastResult) return;
 
     let animId = 0;
     let lastCheck = 0;
-    let consecutiveLocked = 0;
+    let consecutiveReady = 0;
 
     const loop = (timestamp: number) => {
-      if (timestamp - lastCheck >= 160) {
+      if (timestamp - lastCheck >= 140) {
         lastCheck = timestamp;
         const video = videoRef.current;
         const probe = probeCanvasRef.current;
@@ -346,16 +450,18 @@ export default function CameraScanner({
           const sx = (vw - cropW) / 2;
           const sy = (vh - cropH) / 2;
 
-          probe.width = 320;
-          probe.height = 226;
+          probe.width = 420;
+          probe.height = 297;
           const pCtx = probe.getContext('2d', { willReadFrequently: true });
           if (pCtx) {
             pCtx.drawImage(video, sx, sy, cropW, cropH, 0, 0, probe.width, probe.height);
-            const detection = detectFourAnchors(pCtx, probe.width, probe.height);
-            if (detection.locked) {
-              consecutiveLocked += 1;
+            const detection = probeLiveFrame(pCtx, probe.width, probe.height);
+            const inCooldown = timestamp < cooldownUntilRef.current;
+
+            if (detection.readyToCapture && !inCooldown) {
+              consecutiveReady += 1;
             } else {
-              consecutiveLocked = 0;
+              consecutiveReady = 0;
             }
 
             const nextCornerState = {
@@ -363,7 +469,9 @@ export default function CameraScanner({
               tr: Boolean(detection.corners.tr),
               bl: Boolean(detection.corners.bl),
               br: Boolean(detection.corners.br),
-              allLocked: detection.locked,
+              allLocked: Boolean(detection.readyToCapture),
+              qrDetected: Boolean(detection.qrDetected),
+              lockedCount: detection.lockedCount,
             };
 
             setCornerStatus((prev) =>
@@ -371,14 +479,17 @@ export default function CameraScanner({
               prev.tr === nextCornerState.tr &&
               prev.bl === nextCornerState.bl &&
               prev.br === nextCornerState.br &&
-              prev.allLocked === nextCornerState.allLocked
+              prev.allLocked === nextCornerState.allLocked &&
+              prev.qrDetected === nextCornerState.qrDetected &&
+              prev.lockedCount === nextCornerState.lockedCount
                 ? prev
                 : nextCornerState
             );
 
-            // Jika 4 sudut hijau stabil selama 2 siklus (~320 ms), otomatis jepret!
-            if (autoCaptureEnabled && consecutiveLocked >= 2) {
-              consecutiveLocked = 0;
+            // Jika LJK terdeteksi (4 sudut / 3 sudut+estimasi / QR+sudut), langsung jepret otomatis!
+            const requiredFrames = detection.qrDetected ? 1 : 2;
+            if (autoCaptureEnabled && !inCooldown && consecutiveReady >= requiredFrames) {
+              consecutiveReady = 0;
               handleCapture();
               return;
             }
@@ -414,6 +525,7 @@ export default function CameraScanner({
     const result = processCameraFrame(canvas, exam, students);
     triggerScanFeedback();
     setEditingQuestionNo(null);
+    setAutoSavePaused(false);
     setLastResult(applyClassAndStudentOverride(result));
     e.target.value = '';
   }
@@ -421,6 +533,7 @@ export default function CameraScanner({
   // Tap-to-correct: Guru mengetuk nomor soal lalu memilih opsi A/B/C/D/E atau Kosong (-)
   function handleTapManualOption(qNo: string, chosenOpt: string) {
     if (!lastResult) return;
+    setAutoSavePaused(true);
     const qKey = exam.kunciJawaban[qNo];
     let nextAns = chosenOpt;
 
@@ -443,38 +556,43 @@ export default function CameraScanner({
     }
   }
 
-  async function handleConfirmSave() {
-    if (!lastResult) return;
-    setSaving(true);
-    try {
-      const finalResult: ScanResult = {
-        ...lastResult,
-        kelas: (overrideKelas || lastResult.kelas || exam.kelas || 'Kelas 10').trim(),
-        presensi: (overridePresensi || lastResult.presensi || '01').trim(),
-        nama: (overrideNama || lastResult.nama || 'Siswa').trim(),
-      };
-      await onResultSaved(finalResult);
-      setLastResult(null);
-      setEditingQuestionNo(null);
-      advanceToNextPresensi(finalResult.presensi);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   const currentKelasLabel = activeKelas !== 'SEMUA' ? activeKelas : overrideKelas;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col overflow-hidden select-none">
-      {/* Compact Mobile Top Bar (Height ~54px): Info Mapel, Dropdown Kelas, Auto-Scan, Flash & Tutup */}
-      <div className="bg-slate-900/95 border-b border-slate-800 px-3 py-2 flex items-center justify-between gap-2 shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="min-w-0">
-            <p className="text-xs font-bold text-white truncate">{exam.mapel}</p>
-            <p className="text-[10px] text-slate-400 font-mono tabular-nums truncate">
-              {exam.jumlahSoal} Soal · {classResults.length} LJK
-            </p>
-          </div>
+      {/* Input Kamera Sistem HP Tersembunyi (Selalu siap dipicu jika kamera live tertahan) */}
+      <input
+        ref={nativeCameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleImageUpload}
+        className="hidden"
+      />
+
+      {/* Compact Mobile Top Bar: Pilih Mapel/Ujian, Kelas, Auto-Jepret, Auto-Simpan, Flash & Tutup */}
+      <div className="bg-slate-900/95 border-b border-slate-800 px-2.5 py-2 flex items-center justify-between gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {exams.length > 1 && onSelectExamId ? (
+            <select
+              value={exam.id}
+              onChange={(e) => onSelectExamId(e.target.value)}
+              className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1 text-xs font-bold cursor-pointer max-w-[130px] sm:max-w-[200px] truncate min-h-[34px]"
+            >
+              {exams.map((ex) => (
+                <option key={ex.id} value={ex.id}>
+                  {ex.mapel} ({ex.kelas})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-white truncate">{exam.mapel}</p>
+              <p className="text-[10px] text-slate-400 font-mono tabular-nums truncate">
+                {exam.jumlahSoal} Soal · {classResults.length} LJK
+              </p>
+            </div>
+          )}
 
           <select
             value={currentKelasLabel}
@@ -482,7 +600,7 @@ export default function CameraScanner({
               onChangeActiveKelas(e.target.value);
               setOverrideKelas(e.target.value);
             }}
-            className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1.5 text-xs font-semibold cursor-pointer shrink-0 min-h-[36px]"
+            className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1 text-xs font-semibold cursor-pointer shrink-0 min-h-[34px]"
           >
             {classOptions.map((kls) => (
               <option key={kls} value={kls}>
@@ -492,24 +610,38 @@ export default function CameraScanner({
           </select>
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
             onClick={() => setAutoCaptureEnabled((prev) => !prev)}
-            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap min-h-[36px] ${
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer whitespace-nowrap min-h-[34px] ${
               autoCaptureEnabled
-                ? 'bg-emerald-600/20 border border-emerald-500/50 text-emerald-300'
+                ? 'bg-emerald-600/25 border border-emerald-500/60 text-emerald-300'
                 : 'bg-slate-800 border border-slate-700 text-slate-400'
             }`}
+            title="Otomatis Jepret saat LJK Terdeteksi"
           >
-            {autoCaptureEnabled ? 'Auto' : 'Manual'}
+            {autoCaptureEnabled ? 'Auto-Jepret: ON' : 'Jepret Manual'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setAutoSaveEnabled((prev) => !prev)}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer whitespace-nowrap min-h-[34px] ${
+              autoSaveEnabled
+                ? 'bg-blue-600/25 border border-blue-500/60 text-blue-300'
+                : 'bg-slate-800 border border-slate-700 text-slate-400'
+            }`}
+            title="Otomatis Simpan & Lanjut ke Lembar Berikutnya"
+          >
+            {autoSaveEnabled ? 'Auto-Simpan: ON' : 'Simpan Manual'}
           </button>
 
           {torchSupported && (
             <button
               type="button"
               onClick={toggleTorch}
-              className={`p-2 rounded-lg border transition-colors cursor-pointer min-h-[36px] min-w-[36px] flex items-center justify-center ${
+              className={`p-1.5 rounded-lg border transition-colors cursor-pointer min-h-[34px] min-w-[34px] flex items-center justify-center ${
                 torchOn
                   ? 'bg-amber-500 border-amber-400 text-slate-950'
                   : 'bg-slate-800 border-slate-700 text-slate-300'
@@ -526,7 +658,7 @@ export default function CameraScanner({
               stopCamera();
               onCloseScanner();
             }}
-            className="p-2 bg-slate-800 hover:bg-red-600 border border-slate-700 text-slate-200 hover:text-white rounded-lg transition-colors cursor-pointer min-h-[36px] min-w-[36px] flex items-center justify-center"
+            className="p-1.5 bg-slate-800 hover:bg-red-600 border border-slate-700 text-slate-200 hover:text-white rounded-lg transition-colors cursor-pointer min-h-[34px] min-w-[34px] flex items-center justify-center"
             title="Tutup Kamera"
           >
             <X className="w-4 h-4" />
@@ -534,24 +666,48 @@ export default function CameraScanner({
         </div>
       </div>
 
-      {/* Main Camera Viewport: Video selalu terpasang di DOM agar stream langsung tampil begitu mulai scan */}
+      {/* Notifikasi Lembar Terakhir Tersimpan Otomatis */}
+      {recentSavedToast && !lastResult && (
+        <div className="bg-emerald-950/95 border-b border-emerald-700/70 px-3 py-1.5 flex items-center justify-between text-xs shrink-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span className="text-emerald-100 font-semibold truncate">
+              Tersimpan: No.{recentSavedToast.presensi} {recentSavedToast.nama}
+            </span>
+          </div>
+          <span className="font-mono font-bold text-emerald-300 shrink-0 ml-2">
+            Nilai: {recentSavedToast.skor} (B:{recentSavedToast.benar})
+          </span>
+        </div>
+      )}
+
+      {/* Main Camera Viewport: Video TIDAK PERNAH display:none agar decoder video iOS/Android selalu aktif */}
       <div className="flex-1 relative flex flex-col items-center justify-center p-2.5 sm:p-5 overflow-hidden">
         <div className="relative w-full max-w-2xl aspect-[210/148.5] bg-slate-900 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
-          {/* Elemen Video selalu ada di DOM supaya ref tidak pernah null saat startCamera berjalan */}
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
-            className={`w-full h-full object-cover ${cameraOn ? 'block' : 'hidden'}`}
+            onLoadedMetadata={() => {
+              videoRef.current?.play().catch(() => {});
+            }}
+            onCanPlay={() => {
+              videoRef.current?.play().catch(() => {});
+            }}
+            className={`absolute inset-0 w-full h-full object-cover transition-opacity ${
+              cameraOn ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            }`}
           />
 
           {cameraOn && (
             <div
-              className={`pointer-events-none absolute inset-3 sm:inset-5 rounded-xl border-2 transition-colors ${
+              className={`pointer-events-none absolute inset-2.5 sm:inset-4 rounded-xl border-2 transition-colors ${
                 cornerStatus.allLocked
-                  ? 'border-emerald-400 bg-emerald-500/5'
-                  : 'border-white/25'
+                  ? 'border-emerald-400 bg-emerald-500/10'
+                  : cornerStatus.lockedCount >= 2
+                  ? 'border-amber-400/80'
+                  : 'border-white/30'
               }`}
             >
               <div
@@ -575,79 +731,85 @@ export default function CameraScanner({
                 }`}
               />
 
-              <div className="absolute bottom-2.5 inset-x-3 flex items-center justify-center">
+              <div className="absolute bottom-2 inset-x-2 flex items-center justify-center">
                 <div
-                  className={`px-3 py-1 rounded-lg text-[11px] font-semibold backdrop-blur-xs transition-colors ${
+                  className={`px-3 py-1 rounded-lg text-[11px] font-semibold backdrop-blur-xs transition-colors text-center ${
                     cornerStatus.allLocked
                       ? 'bg-emerald-600/95 text-white'
-                      : 'bg-slate-950/80 text-slate-200'
+                      : cornerStatus.lockedCount >= 2
+                      ? 'bg-amber-600/90 text-white'
+                      : 'bg-slate-950/85 text-slate-200'
                   }`}
                 >
                   {cornerStatus.allLocked
-                    ? '4 Sudut Terkunci Hijau · Memotret...'
-                    : 'Paskan 4 Kotak Hitam Sudut LJK ke Bingkai'}
+                    ? 'LJK Terkunci Otomatis · Memotret...'
+                    : cornerStatus.lockedCount > 0
+                    ? `Terdeteksi ${cornerStatus.lockedCount}/4 Sudut · Arahkan Kamera ke LJK`
+                    : 'Arahkan Kamera HP ke Lembar LJK (Otomatis Jepret)'}
                 </div>
               </div>
             </div>
           )}
 
           {!cameraOn && (
-            <div className="p-5 text-center space-y-3 max-w-xs">
-              {cameraStarting ? (
+            <div className="relative z-10 p-5 text-center space-y-3 max-w-xs">
+              {cameraStarting && (
                 <p className="text-xs font-semibold text-slate-300">
-                  Menghubungkan ke Kamera HP...
+                  Menghubungkan ke Kamera Live HP...
                 </p>
-              ) : (
-                <>
-                  {cameraError && (
-                    <div className="p-2.5 bg-amber-950/90 border border-amber-700/80 rounded-xl text-[11px] text-amber-200 flex items-start gap-2 text-left">
-                      <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
-                      <span>{cameraError}</span>
-                    </div>
-                  )}
-                  <div className="flex flex-col gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={startCamera}
-                      className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold text-xs inline-flex items-center justify-center gap-2 cursor-pointer min-h-[44px]"
-                    >
-                      <Camera className="w-4 h-4" />
-                      Coba Buka Kamera Lagi
-                    </button>
-                    <label className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-semibold text-xs inline-flex items-center justify-center gap-2 cursor-pointer min-h-[44px]">
-                      <Upload className="w-4 h-4" />
-                      Ambil Foto Kamera HP / Galeri
-                      <input
-                        type="file"
-                        accept="image/*"
-                        capture="environment"
-                        onChange={handleImageUpload}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-                </>
               )}
+              {cameraError && (
+                <div className="p-2.5 bg-amber-950/90 border border-amber-700/80 rounded-xl text-[11px] text-amber-200 flex items-start gap-2 text-left">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                  <span>{cameraError}</span>
+                </div>
+              )}
+              <div className="flex flex-col gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => nativeCameraInputRef.current?.click()}
+                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs inline-flex items-center justify-center gap-2 cursor-pointer min-h-[44px]"
+                >
+                  <Camera className="w-4 h-4" />
+                  Buka Kamera HP / Ambil Foto LJK
+                </button>
+                <button
+                  type="button"
+                  onClick={startCamera}
+                  className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold text-xs inline-flex items-center justify-center gap-2 cursor-pointer min-h-[44px]"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Coba Kamera Live Lagi
+                </button>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Bottom Thumb-Zone Action Bar di Bawah Kamera */}
+        {/* Bottom Thumb-Zone Action Bar di Bawah Kamera (Selalu Aktif & Bisa Dipencet di Semua HP) */}
         {!lastResult && (
           <div className="mt-3 w-full max-w-md flex items-center gap-2 px-1">
-            {cameraOn && (
-              <button
-                type="button"
-                onClick={handleCapture}
-                className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] text-white rounded-xl font-bold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-all cursor-pointer min-h-[46px]"
-              >
-                <Zap className="w-4 h-4 shrink-0" />
-                Jepret &amp; Koreksi
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleCapture}
+              className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] text-white rounded-xl font-bold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-all cursor-pointer min-h-[46px]"
+            >
+              <Zap className="w-4 h-4 shrink-0" />
+              {cameraOn ? 'Jepret Sekarang' : 'Scan Kamera HP'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => nativeCameraInputRef.current?.click()}
+              className="py-3 px-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors min-h-[46px] shrink-0"
+            >
+              <Camera className="w-4 h-4 shrink-0" />
+              <span>Kamera Sistem</span>
+            </button>
+
             <label className="py-3 px-3.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-xl font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors min-h-[46px] shrink-0">
               <Upload className="w-4 h-4 shrink-0" />
-              <span>Foto / Galeri</span>
+              <span>Galeri</span>
               <input
                 type="file"
                 accept="image/*"
@@ -659,7 +821,7 @@ export default function CameraScanner({
         )}
       </div>
 
-      {/* Bottom Sheet Overlay Hasil Scan Instan + Koreksi Ketuk Nomor (Tap-to-Correct) */}
+      {/* Bottom Sheet Overlay Hasil Scan Instan + Auto-Simpan / Koreksi Ketuk Nomor */}
       {lastResult && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-white text-slate-900 w-full max-w-xl sm:rounded-2xl rounded-t-2xl border border-slate-200 max-h-[90vh] flex flex-col overflow-hidden">
@@ -691,6 +853,23 @@ export default function CameraScanner({
               </div>
             </div>
 
+            {/* Banner Status Auto-Simpan Beruntun */}
+            {autoSaveEnabled && !autoSavePaused && !editingQuestionNo && (
+              <div className="bg-blue-600 text-white px-3.5 py-2 flex items-center justify-between gap-2 text-xs shrink-0">
+                <span className="font-semibold">
+                  Menyimpan otomatis &amp; lanjut scan lembar berikutnya...
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAutoSavePaused(true)}
+                  className="px-2.5 py-1 bg-white text-blue-700 rounded-lg font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <PauseCircle className="w-3.5 h-3.5" />
+                  Tahan / Edit
+                </button>
+              </div>
+            )}
+
             {/* Body Scrollable: Edit Identitas + Foto LJK + Ketuk Nomor untuk Koreksi */}
             <div className="p-3.5 sm:p-4 overflow-y-auto space-y-3.5 flex-1">
               <div className="grid grid-cols-12 gap-2 text-xs">
@@ -700,7 +879,10 @@ export default function CameraScanner({
                   </label>
                   <select
                     value={overrideKelas}
-                    onChange={(e) => setOverrideKelas(e.target.value)}
+                    onChange={(e) => {
+                      setAutoSavePaused(true);
+                      setOverrideKelas(e.target.value);
+                    }}
                     className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-900"
                   >
                     {classOptions.map((kls) => (
@@ -717,7 +899,11 @@ export default function CameraScanner({
                   <input
                     type="text"
                     value={overridePresensi}
-                    onChange={(e) => setOverridePresensi(e.target.value)}
+                    onFocus={() => setAutoSavePaused(true)}
+                    onChange={(e) => {
+                      setAutoSavePaused(true);
+                      setOverridePresensi(e.target.value);
+                    }}
                     className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-mono tabular-nums font-bold text-slate-900"
                   />
                 </div>
@@ -728,7 +914,11 @@ export default function CameraScanner({
                   <input
                     type="text"
                     value={overrideNama}
-                    onChange={(e) => setOverrideNama(e.target.value)}
+                    onFocus={() => setAutoSavePaused(true)}
+                    onChange={(e) => {
+                      setAutoSavePaused(true);
+                      setOverrideNama(e.target.value);
+                    }}
                     className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-900"
                   />
                 </div>
@@ -814,9 +1004,10 @@ export default function CameraScanner({
                       <button
                         key={qNo}
                         type="button"
-                        onClick={() =>
-                          setEditingQuestionNo((prev) => (prev === qNo ? null : qNo))
-                        }
+                        onClick={() => {
+                          setAutoSavePaused(true);
+                          setEditingQuestionNo((prev) => (prev === qNo ? null : qNo));
+                        }}
                         className={`px-1.5 py-1.5 rounded-lg border text-left flex items-center justify-between gap-1 transition-colors cursor-pointer ${
                           isActiveEdit
                             ? 'ring-2 ring-blue-600 bg-blue-50 border-blue-500 text-blue-950'
@@ -854,8 +1045,10 @@ export default function CameraScanner({
               <button
                 type="button"
                 onClick={() => {
+                  cooldownUntilRef.current = performance.now() + 1200;
                   setLastResult(null);
                   setEditingQuestionNo(null);
+                  setAutoSavePaused(false);
                 }}
                 className="py-3 px-3.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl font-semibold text-xs sm:text-sm inline-flex items-center gap-1 transition-colors cursor-pointer shrink-0 min-h-[46px]"
               >

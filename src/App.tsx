@@ -171,6 +171,50 @@ function getClassResultBundleId(examId: string, kelas: string): string {
   return `rekap_${examId}_${kelas.trim().replace(/[^a-zA-Z0-9]/g, '_')}`.slice(0, 120);
 }
 
+const DEFAULT_STARTER_EXAM: Exam = {
+  id: 'ex_matematika_kelas_10',
+  namaUjian: 'PAS Semester Ganjil',
+  mapel: 'Matematika',
+  kelas: 'Kelas 10',
+  jumlahSoal: 25,
+  kapasitasLjk: DEFAULT_LJK_CAPACITY,
+  kunciJawaban: Array.from({ length: 25 }, (_, i) => {
+    const opts = ['A', 'B', 'C', 'D', 'E'];
+    return [
+      String(i + 1),
+      {
+        type: 'PG' as const,
+        answers: [opts[i % 5]],
+        weight: 2,
+      },
+    ];
+  }).reduce<Record<string, QuestionKey>>((acc, [k, v]) => {
+    acc[k as string] = v as QuestionKey;
+    return acc;
+  }, {}),
+};
+
+function loadCachedExams(): Exam[] {
+  try {
+    const raw = localStorage.getItem('evalscan_local_exams');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Exam[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {
+    // Abaikan error storage
+  }
+  return [DEFAULT_STARTER_EXAM];
+}
+
+function saveCachedExams(list: Exam[]) {
+  try {
+    localStorage.setItem('evalscan_local_exams', JSON.stringify(list));
+  } catch {
+    // Abaikan jika kuota localStorage penuh
+  }
+}
+
 interface ClassRosterDoc {
   schoolId: string;
   ownerId: string;
@@ -213,11 +257,14 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
-  // Data Real-Time dengan Firestore Persistent IndexedDB Cache
+  // Data Real-Time dengan Firestore Persistent IndexedDB Cache + Instant Local Fallback untuk Vercel/HP
   const [students, setStudents] = useState<Student[]>([]);
   const [dbSubjects, setDbSubjects] = useState<Subject[]>([]);
-  const [exams, setExams] = useState<Exam[]>([]);
-  const [selectedExamId, setSelectedExamId] = useState<string>('');
+  const [exams, setExams] = useState<Exam[]>(() => loadCachedExams());
+  const [selectedExamId, setSelectedExamId] = useState<string>(() => {
+    const initial = loadCachedExams();
+    return initial[0]?.id || DEFAULT_STARTER_EXAM.id;
+  });
   const [results, setResults] = useState<ScanResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [banner, setBanner] = useState<{ type: 'success' | 'warning'; text: string } | null>(null);
@@ -343,7 +390,9 @@ export default function App() {
           });
         }
       }
-      await batch.commit();
+      batch.commit().catch((error) => {
+        handleFirestoreError(error, OperationType.WRITE, 'class_results');
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'class_results');
     }
@@ -435,6 +484,7 @@ export default function App() {
       examsQuery,
       { includeMetadataChanges: false },
       (snap) => {
+        if (snap.empty && snap.docChanges().length === 0) return;
         setExams((prev) => {
           const map = new Map<string, Exam>(prev.map((item) => [item.id, item]));
           for (const change of snap.docChanges()) {
@@ -448,12 +498,12 @@ export default function App() {
             }
           }
           const list = Array.from(map.values());
-          if (list.length > 0) {
-            setSelectedExamId((curr) => (list.some((e) => e.id === curr) ? curr : list[0].id));
-          } else {
-            setSelectedExamId('');
-          }
-          return list;
+          const finalExams = list.length > 0 ? list : [DEFAULT_STARTER_EXAM];
+          saveCachedExams(finalExams);
+          setSelectedExamId((curr) =>
+            finalExams.some((e) => e.id === curr) ? curr : finalExams[0].id
+          );
+          return finalExams;
         });
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'exams')
@@ -500,7 +550,8 @@ export default function App() {
     };
   }, [authReady, rebuildStudentsFromBundles, rebuildResultsFromBundles]);
 
-  const selectedExam = exams.find((e) => e.id === selectedExamId) || exams[0] || null;
+  const selectedExam =
+    exams.find((e) => e.id === selectedExamId) || exams[0] || DEFAULT_STARTER_EXAM;
   const uniqueClasses = Array.from(new Set(students.map((s) => s.kelas))).sort();
 
   const allClassOptions = React.useMemo(() => {
@@ -608,16 +659,6 @@ export default function App() {
       existing?.id ||
       `sub_custom_${cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now().toString(36)}`;
 
-    await setDoc(doc(db, 'subjects', subId), {
-      schoolId: SCHOOL_ID,
-      ownerId: activeOwnerId,
-      kode: cleanKode,
-      namaMapel: cleanNama,
-      jenjang: cleanJenjang,
-      defaultSoal: 40,
-      createdAt: serverTimestamp(),
-    });
-
     const newSubObj: Subject = {
       id: subId,
       kode: cleanKode,
@@ -629,6 +670,18 @@ export default function App() {
     setDbSubjects((prev) => {
       const filtered = prev.filter((item) => item.id !== subId);
       return [...filtered, newSubObj];
+    });
+
+    setDoc(doc(db, 'subjects', subId), {
+      schoolId: SCHOOL_ID,
+      ownerId: activeOwnerId,
+      kode: cleanKode,
+      namaMapel: cleanNama,
+      jenjang: cleanJenjang,
+      defaultSoal: 40,
+      createdAt: serverTimestamp(),
+    }).catch((error) => {
+      handleFirestoreError(error, OperationType.CREATE, 'subjects');
     });
 
     return cleanNama;
@@ -987,18 +1040,6 @@ export default function App() {
       const cleanMapel = activeMapel.trim().slice(0, 100);
       const examDocId = `ex_${cleanMapel.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}_${targetKelas.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`;
 
-      await setDoc(doc(db, 'exams', examDocId), {
-        schoolId: SCHOOL_ID,
-        ownerId: activeOwnerId,
-        namaUjian: cleanNamaUjian,
-        mapel: cleanMapel,
-        kelas: targetKelas,
-        jumlahSoal: total,
-        kapasitasLjk: DEFAULT_LJK_CAPACITY,
-        kunciJawaban: kunciMap,
-        createdAt: serverTimestamp(),
-      });
-
       const newExamObj: Exam = {
         id: examDocId,
         namaUjian: cleanNamaUjian,
@@ -1008,10 +1049,29 @@ export default function App() {
         kapasitasLjk: DEFAULT_LJK_CAPACITY,
         kunciJawaban: kunciMap,
       };
-      setExams((prev) => [newExamObj, ...prev.filter((item) => item.id !== examDocId)]);
+      setExams((prev) => {
+        const next = [newExamObj, ...prev.filter((item) => item.id !== examDocId)];
+        saveCachedExams(next);
+        return next;
+      });
       setSelectedExamId(examDocId);
       setJumlahSoal(total);
       setIsCustomGuruKelas(false);
+
+      setDoc(doc(db, 'exams', examDocId), {
+        schoolId: SCHOOL_ID,
+        ownerId: activeOwnerId,
+        namaUjian: cleanNamaUjian,
+        mapel: cleanMapel,
+        kelas: targetKelas,
+        jumlahSoal: total,
+        kapasitasLjk: DEFAULT_LJK_CAPACITY,
+        kunciJawaban: kunciMap,
+        createdAt: serverTimestamp(),
+      }).catch((error) => {
+        handleFirestoreError(error, OperationType.CREATE, 'exams');
+      });
+
       showNotification(
         `Kunci jawaban ${cleanMapel} (${targetKelas} · ${total} soal aktif) berhasil disimpan!`
       );
@@ -1072,56 +1132,57 @@ export default function App() {
     const cleanMapel = activeMapel.trim().slice(0, 100);
     const examDocId = `ex_${cleanMapel.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}_${targetKelas.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`;
 
-    setLoading(true);
-    try {
-      await setDoc(doc(db, 'exams', examDocId), {
-        schoolId: SCHOOL_ID,
-        ownerId: activeOwnerId,
-        namaUjian: cleanNamaUjian,
-        mapel: cleanMapel,
-        kelas: targetKelas,
-        jumlahSoal: clampedSoal,
-        kapasitasLjk: DEFAULT_LJK_CAPACITY,
-        kunciJawaban: kunciMap,
-        createdAt: serverTimestamp(),
-      });
+    const newExamObj: Exam = {
+      id: examDocId,
+      namaUjian: cleanNamaUjian,
+      mapel: cleanMapel,
+      kelas: targetKelas,
+      jumlahSoal: clampedSoal,
+      kapasitasLjk: DEFAULT_LJK_CAPACITY,
+      kunciJawaban: kunciMap,
+    };
 
-      const newExamObj: Exam = {
-        id: examDocId,
-        namaUjian: cleanNamaUjian,
-        mapel: cleanMapel,
-        kelas: targetKelas,
-        jumlahSoal: clampedSoal,
-        kapasitasLjk: DEFAULT_LJK_CAPACITY,
-        kunciJawaban: kunciMap,
-      };
-      setExams((prev) => [newExamObj, ...prev.filter((item) => item.id !== examDocId)]);
-      setSelectedExamId(examDocId);
-      setKelasGuru(targetKelas);
-      setIsCustomGuruKelas(false);
-      showNotification(
-        `Kunci ${cleanMapel} (${targetKelas} · ${clampedSoal} soal aktif) tersimpan!`
-      );
-    } catch (error) {
+    setExams((prev) => {
+      const next = [newExamObj, ...prev.filter((item) => item.id !== examDocId)];
+      saveCachedExams(next);
+      return next;
+    });
+    setSelectedExamId(examDocId);
+    setKelasGuru(targetKelas);
+    setIsCustomGuruKelas(false);
+
+    setDoc(doc(db, 'exams', examDocId), {
+      schoolId: SCHOOL_ID,
+      ownerId: activeOwnerId,
+      namaUjian: cleanNamaUjian,
+      mapel: cleanMapel,
+      kelas: targetKelas,
+      jumlahSoal: clampedSoal,
+      kapasitasLjk: DEFAULT_LJK_CAPACITY,
+      kunciJawaban: kunciMap,
+      createdAt: serverTimestamp(),
+    }).catch((error) => {
       handleFirestoreError(error, OperationType.CREATE, 'exams');
-    } finally {
-      setLoading(false);
-    }
+    });
+
+    showNotification(
+      `Kunci ${cleanMapel} (${targetKelas} · ${clampedSoal} soal aktif) tersimpan!`
+    );
   }
 
   async function handleDeleteExam(id: string) {
-    try {
-      await deleteDoc(doc(db, 'exams', id));
-      setExams((prev) => {
-        const next = prev.filter((e) => e.id !== id);
-        if (selectedExamId === id) {
-          setSelectedExamId(next[0]?.id || '');
-        }
-        return next;
-      });
-    } catch (error) {
+    setExams((prev) => {
+      const filtered = prev.filter((e) => e.id !== id);
+      const next = filtered.length > 0 ? filtered : [DEFAULT_STARTER_EXAM];
+      saveCachedExams(next);
+      if (selectedExamId === id) {
+        setSelectedExamId(next[0]?.id || DEFAULT_STARTER_EXAM.id);
+      }
+      return next;
+    });
+    deleteDoc(doc(db, 'exams', id)).catch((error) => {
       handleFirestoreError(error, OperationType.DELETE, `exams/${id}`);
-    }
+    });
   }
 
   async function handleDeleteResult(id?: string) {
@@ -1253,14 +1314,13 @@ export default function App() {
     selectedExam;
 
   function openFullscreenScannerForExam(targetExam?: Exam | null, targetKelas?: string) {
-    const activeEx = targetExam || selectedExam;
-    if (!activeEx) {
-      showNotification(
-        'Silakan buat paket ujian & kunci jawaban terlebih dahulu sebelum memulai scan.',
-        'warning'
-      );
-      setTab('ujian');
-      return;
+    const activeEx = targetExam || selectedExam || DEFAULT_STARTER_EXAM;
+    if (!exams.some((e) => e.id === activeEx.id)) {
+      setExams((prev) => {
+        const next = [activeEx, ...prev];
+        saveCachedExams(next);
+        return next;
+      });
     }
     setSelectedExamId(activeEx.id);
     setScanKelasFilter(targetKelas || activeEx.kelas || 'Kelas 10');
@@ -1718,9 +1778,11 @@ export default function App() {
       </nav>
 
       {/* FULLSCREEN SCANNER OVERLAY ALA EVALBEE (TERPISAH DARI NAVBAR & REKAP) */}
-      {scannerFullscreenOpen && selectedExam && (
+      {scannerFullscreenOpen && (
         <CameraScanner
           exam={selectedExam}
+          exams={exams}
+          onSelectExamId={setSelectedExamId}
           activeKelas={scanKelasFilter}
           classOptions={allClassOptions}
           onChangeActiveKelas={(kls) => setScanKelasFilter(kls)}

@@ -41,10 +41,13 @@ export interface AnchorDetectionResult {
     br: Point2D | null;
   };
   lockedCount: number;
+  qrDetected?: boolean;
+  readyToCapture?: boolean;
 }
 
 /**
  * Mencari titik pusat blok hitam anchor (kotak hitam 6x6 mm) di suatu kuadran citra.
+ * Disesuaikan agar adaptif terhadap auto-exposure kamera HP dan pencahayaan ruangan.
  */
 function findDarkSquareInRegion(
   gray: Uint8Array,
@@ -71,25 +74,25 @@ function findDarkSquareInRegion(
   }
   if (count === 0) return null;
   const avg = sum / count;
-  // Harus ada kontras gelap yang jelas dibanding latar kertas
-  if (avg - minVal < 40) return null;
+  // Toleransi kontras lebih adaptif untuk kamera HP di dalam ruangan
+  if (avg - minVal < 22) return null;
 
-  const darkThresh = Math.min(115, minVal + (avg - minVal) * 0.35);
-  const winRadius = Math.max(3, Math.round(Math.min(width, height) * 0.014));
+  const darkThresh = Math.min(155, minVal + (avg - minVal) * 0.45);
+  const winRadius = Math.max(2, Math.round(Math.min(width, height) * 0.013));
 
   let bestScore = -1;
   let bestX = -1;
   let bestY = -1;
 
-  for (let y = y0 + winRadius; y < y1 - winRadius; y += 3) {
-    for (let x = x0 + winRadius; x < x1 - winRadius; x += 3) {
+  for (let y = y0 + winRadius; y < y1 - winRadius; y += 2) {
+    for (let x = x0 + winRadius; x < x1 - winRadius; x += 2) {
       if (gray[y * width + x] > darkThresh) continue;
 
       let darkPixels = 0;
       let totalWin = 0;
-      for (let dy = -winRadius; dy <= winRadius; dy += 2) {
+      for (let dy = -winRadius; dy <= winRadius; dy += 1) {
         const rOff = (y + dy) * width;
-        for (let dx = -winRadius; dx <= winRadius; dx += 2) {
+        for (let dx = -winRadius; dx <= winRadius; dx += 1) {
           totalWin++;
           if (gray[rOff + x + dx] <= darkThresh) {
             darkPixels++;
@@ -98,8 +101,8 @@ function findDarkSquareInRegion(
       }
 
       const fillRatio = darkPixels / totalWin;
-      // Kotak anchor hitam pekat memiliki fillRatio tinggi (>0.55)
-      if (fillRatio > 0.55 && fillRatio > bestScore) {
+      // Kotak anchor hitam pada kamera HP (termasuk sedikit blur fokus) memiliki fillRatio > 0.36
+      if (fillRatio > 0.36 && fillRatio > bestScore) {
         bestScore = fillRatio;
         bestX = x;
         bestY = y;
@@ -139,6 +142,7 @@ function findDarkSquareInRegion(
 
 /**
  * Deteksi 4 kotak hitam sudut (HALF_ANCHORS) secara real-time ala EvalBee.
+ * Mendukung estimasi sudut ke-4 secara geometris apabila 1 sudut tertutup bayangan/silau di HP.
  */
 export function detectFourAnchors(
   ctx: CanvasRenderingContext2D,
@@ -151,13 +155,14 @@ export function detectFourAnchors(
     gray[j] = (imgData[i] * 77 + imgData[i + 1] * 150 + imgData[i + 2] * 29) >> 8;
   }
 
-  const qW = Math.floor(width * 0.26);
-  const qH = Math.floor(height * 0.28);
+  // Area kuadran diperluas (38% x 40%) agar kamera HP vertikal maupun horizontal mudah menangkap sudut LJK
+  const qW = Math.floor(width * 0.38);
+  const qH = Math.floor(height * 0.40);
 
-  const tl = findDarkSquareInRegion(gray, width, height, 2, 2, qW, qH);
-  const tr = findDarkSquareInRegion(gray, width, height, width - qW, 2, width - 2, qH);
-  const bl = findDarkSquareInRegion(gray, width, height, 2, height - qH, qW, height - 2);
-  const br = findDarkSquareInRegion(
+  let tl = findDarkSquareInRegion(gray, width, height, 2, 2, qW, qH);
+  let tr = findDarkSquareInRegion(gray, width, height, width - qW, 2, width - 2, qH);
+  let bl = findDarkSquareInRegion(gray, width, height, 2, height - qH, qW, height - 2);
+  let br = findDarkSquareInRegion(
     gray,
     width,
     height,
@@ -167,7 +172,21 @@ export function detectFourAnchors(
     height - 2
   );
 
-  const foundList = [tl, tr, bl, br].filter(Boolean);
+  const rawCount = [tl, tr, bl, br].filter(Boolean).length;
+
+  // Jika 3 sudut sudah terbaca jelas namun 1 sudut silau/bayangan, estimasi sudut ke-4 dengan aturan jajaran genjang
+  if (rawCount === 3) {
+    if (!br && tl && tr && bl) {
+      br = { x: tr.x + (bl.x - tl.x), y: tr.y + (bl.y - tl.y) };
+    } else if (!bl && tl && tr && br) {
+      bl = { x: tl.x + (br.x - tr.x), y: tl.y + (br.y - tr.y) };
+    } else if (!tr && tl && bl && br) {
+      tr = { x: tl.x + (br.x - bl.x), y: tl.y + (br.y - bl.y) };
+    } else if (!tl && tr && bl && br) {
+      tl = { x: tr.x + (bl.x - br.x), y: tr.y + (bl.y - br.y) };
+    }
+  }
+
   let geometryValid = false;
 
   if (tl && tr && bl && br) {
@@ -176,14 +195,14 @@ export function detectFourAnchors(
     const leftH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
     const rightH = Math.hypot(br.x - tr.x, br.y - tr.y);
 
-    // Validasi proporsi persegi panjang LJK setengah A4
+    // Validasi proporsi persegi panjang LJK yang toleran terhadap jarak kamera HP
     if (
-      topW > width * 0.55 &&
-      botW > width * 0.55 &&
-      leftH > height * 0.55 &&
-      rightH > height * 0.55 &&
-      Math.abs(topW - botW) < width * 0.22 &&
-      Math.abs(leftH - rightH) < height * 0.22
+      topW > width * 0.32 &&
+      botW > width * 0.32 &&
+      leftH > height * 0.32 &&
+      rightH > height * 0.32 &&
+      Math.abs(topW - botW) < width * 0.34 &&
+      Math.abs(leftH - rightH) < height * 0.34
     ) {
       geometryValid = true;
     }
@@ -192,7 +211,50 @@ export function detectFourAnchors(
   return {
     locked: geometryValid,
     corners: { tl, tr, bl, br },
-    lockedCount: foundList.length,
+    lockedCount: rawCount,
+  };
+}
+
+/**
+ * Probe frame kamera HP secara real-time:
+ * Menggabungkan deteksi 4 sudut hitam + pembacaan cepat QR Code LJK
+ * agar auto-scan di HP langsung menjepret otomatis tanpa harus sangat presisi.
+ */
+export function probeLiveFrame(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number
+): AnchorDetectionResult {
+  const anchorRes = detectFourAnchors(ctx, width, height);
+  if (anchorRes.locked && anchorRes.lockedCount >= 4) {
+    return {
+      ...anchorRes,
+      qrDetected: false,
+      readyToCapture: true,
+    };
+  }
+
+  // Cek QR code pada frame probe jika minimal 2 sudut terlihat atau untuk membantu pemicu otomatis di HP
+  let qrDetected = false;
+  try {
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const qr = jsQR(imgData.data, width, height, {
+      inversionAttempts: 'dontInvert',
+    });
+    if (qr && qr.data) {
+      qrDetected = true;
+    }
+  } catch {
+    qrDetected = false;
+  }
+
+  const readyToCapture =
+    anchorRes.locked || (qrDetected && anchorRes.lockedCount >= 2);
+
+  return {
+    ...anchorRes,
+    qrDetected,
+    readyToCapture,
   };
 }
 

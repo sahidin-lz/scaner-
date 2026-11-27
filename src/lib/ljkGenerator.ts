@@ -49,7 +49,7 @@ export interface Exam {
 
 /**
  * Memotong teks secara presisi berdasarkan lebar maksimum (dalam mm) pada jsPDF
- * agar nama siswa, nama mata pelajaran, kelas, dan judul ujian tidak pernah bertabrakan.
+ * hanya jika teks benar-benar melebihi batas kolom.
  */
 function fitPdfText(doc: jsPDF, text: string, maxWidthMm: number): string {
   const clean = (text || '-').trim();
@@ -81,7 +81,7 @@ function fitCanvasText(
 /**
  * Menggambar 1 unit LJK Setengah A4 Hitam Putih Kontras Tinggi (210 x 148.5 mm)
  * pada posisi vertikal offsetY (0 atau 148.5 mm).
- * Desain Hitam Putih Murni: hemat tinta, tajam saat difotokopi, dan membuat kontras arsiran jawaban siswa sangat tinggi.
+ * Tabel Identitas 4 Baris Lebar (78mm) menjamin NAMA SISWA dan KELAS / ROMBEL tampil LENGKAP tanpa terpotong.
  */
 async function drawSingleHalfLJKPdf(
   doc: jsPDF,
@@ -89,9 +89,15 @@ async function drawSingleHalfLJKPdf(
   mapelName: string,
   examTitle: string,
   offsetY: number,
-  exam?: Exam | null
+  exam?: Exam | null,
+  shadedAnswers?: Record<string, string> | null
 ) {
   const kapasitas = DEFAULT_LJK_CAPACITY; // Default 40 soal
+  const cleanNamaSiswa = (student.nama || `PESERTA NO. ${student.presensi || '01'}`).trim();
+  const cleanKelasSiswa = (student.kelas || exam?.kelas || 'KELAS 10').trim();
+  const cleanPresensiSiswa = (student.presensi || '01').trim().padStart(2, '0');
+  const cleanMapel = (mapelName || exam?.mapel || 'MATA PELAJARAN').trim();
+  const cleanExamTitle = (examTitle || exam?.namaUjian || 'PENILAIAN SEKOLAH').trim();
 
   // 1. 4 Kotak Hitam Sudut OMR (Anchor Markers) — Koordinat presisi tetap
   doc.setFillColor(0, 0, 0);
@@ -99,155 +105,187 @@ async function drawSingleHalfLJKPdf(
     doc.rect(pt.x, pt.y + offsetY, HALF_ANCHORS.size, HALF_ANCHORS.size, 'F');
   });
 
-  // 2. Kop LJK Hitam Putih Tegas (x=18..190, y=7..17.2)
+  // 2. Kop LJK Hitam Putih Resmi (x=18..190, y=7..17.2)
   doc.setFillColor(255, 255, 255);
   doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.45);
+  doc.setLineWidth(0.5);
   doc.rect(18, 7 + offsetY, 172, 10.2, 'FD');
 
-  // Garis pemisah tipis di bawah Kop
-  doc.setLineWidth(0.25);
-  doc.line(18, 16.4 + offsetY, 190, 16.4 + offsetY);
+  // Garis aksen ganda tipis di bagian bawah Kop
+  doc.setLineWidth(0.22);
+  doc.line(18, 16.3 + offsetY, 190, 16.3 + offsetY);
 
   // Teks Judul Kop Hitam Tegas
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9.5);
+  doc.setFontSize(9.4);
   doc.setTextColor(0, 0, 0);
-  doc.text('LEMBAR JAWABAN KOMPUTER (LJK)', 21, 11.2 + offsetY);
+  doc.text('LEMBAR JAWABAN KOMPUTER (LJK)', 20.5, 11.2 + offsetY);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.4);
-  doc.setTextColor(40, 40, 40);
+  doc.setFontSize(7.1);
+  doc.setTextColor(35, 35, 35);
   const headerSub = fitPdfText(
     doc,
-    `${examTitle.toUpperCase()}  •  SISTEM PEMINDAI OMR KAMERA`,
-    122
+    `${cleanExamTitle.toUpperCase()}  •  FORMULIR OMR STANDAR`,
+    108
   );
-  doc.text(headerSub, 21, 15 + offsetY);
+  doc.text(headerSub, 20.5, 14.9 + offsetY);
 
-  // Badge Kelas & Presensi di Kanan Kop (x=147..188) Hitam Putih
+  // Kotak Kelas & Presensi Lebar di Kanan Kop (x=131..188.5, lebar 57.5mm agar nama kelas panjang tampil utuh)
   doc.setFillColor(255, 255, 255);
   doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.35);
-  doc.rect(147, 8.4 + offsetY, 41, 6.8, 'FD');
+  doc.setLineWidth(0.38);
+  doc.rect(131, 8.3 + offsetY, 57.5, 7.0, 'FD');
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.4);
+  doc.setFontSize(7.3);
   doc.setTextColor(0, 0, 0);
   const badgeText = fitPdfText(
     doc,
-    `${student.kelas.toUpperCase()} • NO. ${student.presensi}`,
-    38
+    `${cleanKelasSiswa.toUpperCase()}  •  NO. ${cleanPresensiSiswa}`,
+    54.5
   );
-  doc.text(badgeText, 167.5, 12.8 + offsetY, { align: 'center' });
+  doc.text(badgeText, 159.75, 12.8 + offsetY, { align: 'center' });
 
-  // 3. Tabel Identitas Siswa Hitam Putih Bersih (x=18..162, y=19..43.5)
+  // 3. Tabel Identitas Siswa Lengkap 4 Baris (x=18..162, y=18.6..43.6, lebar=144mm, tinggi=25mm)
+  // Kolom Label Kiri: 27mm (x=18..45)
+  // Kolom Isi Utama Lebar: 78mm (x=45..123) -> Nama Siswa & Kelas tampil sangat lega dan lengkap!
+  // Kolom Label Kanan: 20mm (x=123..143)
+  // Kolom Isi Kanan: 19mm (x=143..162)
   const tableX = 18;
-  const tableY = 19 + offsetY;
+  const tableY = 18.6 + offsetY;
   const tableW = 144;
-  const rowH = 6.2;
+  const rowH = 4.9;
+  const footerH = 5.4;
 
   doc.setFillColor(255, 255, 255);
   doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.35);
-  doc.rect(tableX, tableY, tableW, rowH * 3 + 5.8, 'FD');
+  doc.setLineWidth(0.4);
+  doc.rect(tableX, tableY, tableW, rowH * 4 + footerH, 'FD');
 
-  // Garis Horizontal antar baris
-  doc.setLineWidth(0.25);
+  // Garis Horizontal antar baris (4 baris identitas + 1 baris petunjuk)
+  doc.setLineWidth(0.24);
   doc.line(tableX, tableY + rowH, tableX + tableW, tableY + rowH);
   doc.line(tableX, tableY + rowH * 2, tableX + tableW, tableY + rowH * 2);
   doc.line(tableX, tableY + rowH * 3, tableX + tableW, tableY + rowH * 3);
-  // Garis Vertikal pemisah kolom
-  doc.line(tableX + 30, tableY, tableX + 30, tableY + rowH * 3);
-  doc.line(tableX + 100, tableY, tableX + 100, tableY + rowH * 3);
-  doc.line(tableX + 121, tableY, tableX + 121, tableY + rowH * 3);
+  doc.line(tableX, tableY + rowH * 4, tableX + tableW, tableY + rowH * 4);
 
-  // Isi Teks Baris 1: NAMA SISWA & PRESENSI
+  // Garis Vertikal pemisah kolom identitas
+  doc.line(tableX + 27, tableY, tableX + 27, tableY + rowH * 4);
+  doc.line(tableX + 105, tableY, tableX + 105, tableY + rowH * 4);
+  doc.line(tableX + 125, tableY, tableX + 125, tableY + rowH * 4);
+
+  // BARIS 1: NAMA SISWA LENGKAP & NO. PRESENSI
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.3);
+  doc.setFontSize(7.0);
   doc.setTextColor(0, 0, 0);
-  doc.text('NAMA SISWA', tableX + 2, tableY + 4.2);
+  doc.text('NAMA SISWA', tableX + 2, tableY + 3.4);
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.1);
-  doc.text(fitPdfText(doc, student.nama.toUpperCase(), 66), tableX + 32, tableY + 4.2);
+  doc.setFontSize(8.2);
+  doc.text(fitPdfText(doc, cleanNamaSiswa.toUpperCase(), 74.5), tableX + 29, tableY + 3.5);
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.2);
-  doc.text('PRESENSI', tableX + 102, tableY + 4.2);
+  doc.setFontSize(6.8);
+  doc.text('PRESENSI', tableX + 107, tableY + 3.4);
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.4);
-  doc.text(fitPdfText(doc, student.presensi, 19), tableX + 132.5, tableY + 4.2, {
+  doc.setFontSize(8.6);
+  doc.text(fitPdfText(doc, cleanPresensiSiswa, 16), tableX + 134.5, tableY + 3.5, {
     align: 'center',
   });
 
-  // Isi Teks Baris 2: MATA PELAJARAN & KELAS
+  // BARIS 2: KELAS / ROMBEL LENGKAP & JUMLAH SOAL
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.3);
-  doc.text('MATA PELAJARAN', tableX + 2, tableY + rowH + 4.2);
+  doc.setFontSize(7.0);
+  doc.text('KELAS / ROMBEL', tableX + 2, tableY + rowH + 3.4);
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.0);
-  doc.text(fitPdfText(doc, mapelName.toUpperCase(), 66), tableX + 32, tableY + rowH + 4.2);
+  doc.text(
+    fitPdfText(doc, cleanKelasSiswa.toUpperCase(), 74.5),
+    tableX + 29,
+    tableY + rowH + 3.5
+  );
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.2);
-  doc.text('KELAS', tableX + 102, tableY + rowH + 4.2);
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.6);
-  doc.text(fitPdfText(doc, student.kelas.toUpperCase(), 20), tableX + 132.5, tableY + rowH + 4.2, {
-    align: 'center',
-  });
-
-  // Isi Teks Baris 3: PAKET UJIAN & JML SOAL
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.3);
-  doc.text('PAKET UJIAN', tableX + 2, tableY + rowH * 2 + 4.2);
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.6);
-  doc.text(fitPdfText(doc, examTitle.toUpperCase(), 66), tableX + 32, tableY + rowH * 2 + 4.2);
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.2);
-  doc.text('JML SOAL', tableX + 102, tableY + rowH * 2 + 4.2);
+  doc.setFontSize(6.8);
+  doc.text('JML SOAL', tableX + 107, tableY + rowH + 3.4);
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(7.5);
   const activeSoalNum = exam?.jumlahSoal || 40;
   const soalInfo = exam ? `${exam.jumlahSoal} / 40` : '40 SOAL';
-  doc.text(soalInfo, tableX + 132.5, tableY + rowH * 2 + 4.2, { align: 'center' });
+  doc.text(soalInfo, tableX + 134.5, tableY + rowH + 3.4, { align: 'center' });
 
-  // Isi Teks Baris 4: Petunjuk Pengisian Hitam Putih
+  // BARIS 3: MATA PELAJARAN LENGKAP & KODE MAPEL
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(6.5);
-  doc.setTextColor(20, 20, 20);
+  doc.setFontSize(7.0);
+  doc.text('MATA PELAJARAN', tableX + 2, tableY + rowH * 2 + 3.4);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.8);
   doc.text(
-    'PETUNJUK: Hitamkan bulatan jawaban secara penuh. Kamera otomatis mendeteksi nama, kelas, nomor & jawaban.',
-    tableX + 2.5,
-    tableY + rowH * 3 + 3.8
+    fitPdfText(doc, cleanMapel.toUpperCase(), 74.5),
+    tableX + 29,
+    tableY + rowH * 2 + 3.4
   );
 
-  // 4. Kotak QR Code Hitam Putih Kontras Tinggi di Kanan (x=164..190, y=19..43.4)
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.8);
+  doc.text('STATUS', tableX + 107, tableY + rowH * 2 + 3.4);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.8);
+  doc.text(shadedAnswers ? 'TERARSIR' : 'UTAMA', tableX + 134.5, tableY + rowH * 2 + 3.4, {
+    align: 'center',
+  });
+
+  // BARIS 4: PAKET UJIAN & PARAF SISWA
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.0);
+  doc.text('PAKET UJIAN', tableX + 2, tableY + rowH * 3 + 3.4);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.4);
+  doc.text(
+    fitPdfText(doc, cleanExamTitle.toUpperCase(), 74.5),
+    tableX + 29,
+    tableY + rowH * 3 + 3.4
+  );
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.8);
+  doc.text('PARAF', tableX + 107, tableY + rowH * 3 + 3.4);
+
+  // BARIS 5: Petunjuk Pengisian Hitam Putih
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.4);
+  doc.setTextColor(15, 15, 15);
+  doc.text(
+    'PETUNJUK: Hitamkan bulatan jawaban secara penuh & rapi. Kamera otomatis membaca QR Identitas (Nama, Kelas, Presensi) & Jawaban.',
+    tableX + 2.2,
+    tableY + rowH * 4 + 3.6
+  );
+
+  // 4. Kotak QR Code Hitam Putih Kontras Tinggi di Kanan (x=164..190, y=18.6..43.6)
   doc.setFillColor(255, 255, 255);
   doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.35);
-  doc.rect(164, tableY, 26, rowH * 3 + 5.8, 'FD');
+  doc.setLineWidth(0.4);
+  doc.rect(164, tableY, 26, rowH * 4 + footerH, 'FD');
 
-  doc.setLineWidth(0.25);
+  doc.setLineWidth(0.24);
   doc.line(164, tableY + 3.8, 190, tableY + 3.8);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(5.8);
+  doc.setFontSize(5.7);
   doc.setTextColor(0, 0, 0);
   doc.text('QR IDENTITAS', 177, tableY + 2.7, { align: 'center' });
 
   const qrPayload = JSON.stringify({
     sId: student.id,
-    prs: student.presensi,
-    nm: student.nama.slice(0, 34),
-    kls: student.kelas,
-    mpl: mapelName,
+    prs: cleanPresensiSiswa,
+    nm: cleanNamaSiswa.slice(0, 48),
+    kls: cleanKelasSiswa.slice(0, 45),
+    mpl: cleanMapel,
     jml: activeSoalNum,
     eId: exam?.id || '',
   });
@@ -260,7 +298,7 @@ async function drawSingleHalfLJKPdf(
       light: '#ffffff',
     },
   });
-  doc.addImage(qrDataUrl, 'PNG', 166.5, tableY + 4.1, 21, 20.1);
+  doc.addImage(qrDataUrl, 'PNG', 166.5, tableY + 4.3, 21, 20.2);
 
   // 5. Header & Bingkai 4 Kolom Jawaban Hitam Putih Tanpa Zebra Abu-abu (01-10, 11-20, 21-30, 31-40)
   const colStartX = [27, 70, 113, 156];
@@ -270,15 +308,23 @@ async function drawSingleHalfLJKPdf(
   colBoxLeft.forEach((boxX, colIdx) => {
     const baseX = colStartX[colIdx];
 
-    // Bingkai Luar Kolom Putih Bersih (membuat kontras bulatan 100% murni)
+    // Bingkai Luar Kolom Putih Bersih
     doc.setFillColor(255, 255, 255);
     doc.setDrawColor(0, 0, 0);
-    doc.setLineWidth(0.32);
+    doc.setLineWidth(0.35);
     doc.rect(boxX, 46.5 + offsetY, colBoxW, 84.5, 'FD');
 
     // Garis Bawah Header Kolom
-    doc.setLineWidth(0.3);
+    doc.setLineWidth(0.32);
     doc.line(boxX, 52.3 + offsetY, boxX + colBoxW, 52.3 + offsetY);
+
+    // Garis Pemisah Halus antara Soal ke-5 dan ke-6 di tiap kolom (y = 91.75mm, aman di luar bulatan)
+    doc.setDrawColor(170, 170, 170);
+    doc.setLineWidth(0.18);
+    doc.setLineDashPattern([1.2, 1.2], 0);
+    doc.line(boxX + 1.5, 91.75 + offsetY, boxX + colBoxW - 1.5, 91.75 + offsetY);
+    doc.setLineDashPattern([], 0);
+    doc.setDrawColor(0, 0, 0);
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7.2);
@@ -289,7 +335,7 @@ async function drawSingleHalfLJKPdf(
     });
   });
 
-  // 6. Grid 40 Soal (4 Kolom x 10 Baris) — Koordinat Bulatan Tetap Presisi & Hitam Putih
+  // 6. Grid 40 Soal (4 Kolom x 10 Baris) — Mendukung LJK Kosong maupun LJK dengan Arsiran per Jawaban
   for (let q = 1; q <= kapasitas; q++) {
     const firstBubble = getHalfBubblePosition(q, 0, offsetY);
     const isPgk = exam?.kunciJawaban?.[String(q)]?.type === 'PGK';
@@ -305,27 +351,39 @@ async function drawSingleHalfLJKPdf(
     }
     doc.text(labelNo, firstBubble.x - 7.0, firstBubble.y + 1);
 
+    const rawAnsForQ = !isExceeded && shadedAnswers ? (shadedAnswers[String(q)] || '') : '';
+
     OPTIONS.forEach((opt, optIdx) => {
       const pos = getHalfBubblePosition(q, optIdx, offsetY);
-      // Isi lingkaran dengan warna putih murni agar deteksi kecerahan OMR sangat sensitif
-      doc.setFillColor(255, 255, 255);
-      if (isExceeded) {
-        doc.setDrawColor(190, 190, 190);
-        doc.setLineWidth(0.22);
-      } else {
-        doc.setDrawColor(55, 55, 55);
-        doc.setLineWidth(0.28);
-      }
-      doc.circle(pos.x, pos.y, pos.radius, 'FD');
+      const isBubbleShaded = rawAnsForQ !== '-' && rawAnsForQ.includes(opt);
 
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(5.3);
-      if (isExceeded) {
-        doc.setTextColor(195, 195, 195);
+      if (isBubbleShaded) {
+        // Bulatan terarsir hitam pekat (siap dipindai kamera OMR atau sebagai arsip fisik)
+        doc.setFillColor(0, 0, 0);
+        doc.setDrawColor(0, 0, 0);
+        doc.setLineWidth(0.3);
+        doc.circle(pos.x, pos.y, pos.radius, 'FD');
       } else {
-        doc.setTextColor(125, 125, 125);
+        // Bulatan kosong putih murni
+        doc.setFillColor(255, 255, 255);
+        if (isExceeded) {
+          doc.setDrawColor(190, 190, 190);
+          doc.setLineWidth(0.22);
+        } else {
+          doc.setDrawColor(50, 50, 50);
+          doc.setLineWidth(0.28);
+        }
+        doc.circle(pos.x, pos.y, pos.radius, 'FD');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(5.3);
+        if (isExceeded) {
+          doc.setTextColor(195, 195, 195);
+        } else {
+          doc.setTextColor(120, 120, 120);
+        }
+        doc.text(opt, pos.x, pos.y + 0.72, { align: 'center' });
       }
-      doc.text(opt, pos.x, pos.y + 0.72, { align: 'center' });
     });
   }
 
@@ -334,6 +392,7 @@ async function drawSingleHalfLJKPdf(
 
 /**
  * Cetak LJK PDF Hitam Putih Hemat Kertas: 1 Halaman A4 = 2 Siswa (Atas & Bawah) dengan Default 40 Soal.
+ * Mendukung LJK Kosong maupun LJK dengan Arsiran per Jawaban (via answersByStudentId).
  */
 export async function generateTwoInOneLJKPdf(params: {
   mapel: string;
@@ -341,6 +400,8 @@ export async function generateTwoInOneLJKPdf(params: {
   namaUjian?: string;
   students: Student[];
   exam?: Exam | null;
+  answersByStudentId?: Record<string, Record<string, string>>;
+  filePrefix?: string;
   onNotify?: (msg: string) => void;
 }): Promise<boolean> {
   const {
@@ -349,6 +410,8 @@ export async function generateTwoInOneLJKPdf(params: {
     namaUjian = 'PENILAIAN SEKOLAH',
     students,
     exam,
+    answersByStudentId,
+    filePrefix = 'LJK_BW_2in1',
     onNotify,
   } = params;
 
@@ -364,8 +427,11 @@ export async function generateTwoInOneLJKPdf(params: {
   for (let i = 0; i < students.length; i += 2) {
     if (i > 0) doc.addPage();
 
+    const studentTop = students[i];
+    const shadedTop = answersByStudentId?.[studentTop.id] || null;
+
     // LJK Atas (Siswa ke-i)
-    await drawSingleHalfLJKPdf(doc, students[i], mapel, namaUjian, 0, exam);
+    await drawSingleHalfLJKPdf(doc, studentTop, mapel, namaUjian, 0, exam, shadedTop);
 
     // Garis Potong Tengah Halaman A4 Hitam Putih (y = 148.5 mm)
     doc.setDrawColor(80, 80, 80);
@@ -386,14 +452,88 @@ export async function generateTwoInOneLJKPdf(params: {
 
     // LJK Bawah (Siswa ke-(i+1) jika ada)
     if (i + 1 < students.length) {
-      await drawSingleHalfLJKPdf(doc, students[i + 1], mapel, namaUjian, HALF_H, exam);
+      const studentBottom = students[i + 1];
+      const shadedBottom = answersByStudentId?.[studentBottom.id] || null;
+      await drawSingleHalfLJKPdf(
+        doc,
+        studentBottom,
+        mapel,
+        namaUjian,
+        HALF_H,
+        exam,
+        shadedBottom
+      );
     }
   }
 
   const safeMapel = mapel.replace(/\s+/g, '_');
   const safeKelas = kelasLabel.replace(/\s+/g, '_');
-  doc.save(`LJK_BW_2in1_${safeMapel}_${safeKelas}.pdf`);
+  doc.save(`${filePrefix}_${safeMapel}_${safeKelas}.pdf`);
   return true;
+}
+
+/**
+ * Cetak LJK PDF dengan Arsiran Per Jawaban (Cadangan & Uji Scan / Master Kunci & Siswa):
+ * Menghasilkan LJK Hitam Putih 2-in-1 yang sudah memiliki arsiran hitam pada bulatan jawaban tiap nomor soal.
+ */
+export async function generateShadedExamLJKPdf(params: {
+  exam: Exam;
+  students: Student[];
+  existingAnswersByPresensi?: Record<string, Record<string, string>>;
+  onNotify?: (msg: string) => void;
+}): Promise<boolean> {
+  const { exam, students, existingAnswersByPresensi = {}, onNotify } = params;
+  if (students.length === 0) {
+    if (onNotify) onNotify(`Belum ada data siswa untuk kelas ${exam.kelas}.`);
+    return false;
+  }
+
+  const answersByStudentId: Record<string, Record<string, string>> = {};
+  const activeCount = Math.min(DEFAULT_LJK_CAPACITY, Math.max(1, exam.jumlahSoal));
+
+  students.forEach((st, sIdx) => {
+    const existing = existingAnswersByPresensi[st.presensi];
+    if (existing && Object.keys(existing).length > 0) {
+      answersByStudentId[st.id] = existing;
+      return;
+    }
+
+    const map: Record<string, string> = {};
+    for (let q = 1; q <= activeCount; q++) {
+      const qKey = exam.kunciJawaban[String(q)];
+      if (!qKey || qKey.answers.length === 0) {
+        map[String(q)] = 'A';
+        continue;
+      }
+      if (sIdx === 0) {
+        map[String(q)] = qKey.answers.join('');
+      } else {
+        if (qKey.type === 'PG') {
+          const keyOpt = qKey.answers[0] || 'A';
+          const keyIdx = Math.max(0, OPTIONS.indexOf(keyOpt as typeof OPTIONS[number]));
+          const shouldVary = (q + sIdx) % 7 === 0;
+          const chosenOpt = shouldVary
+            ? OPTIONS[(keyIdx + (sIdx % 4) + 1) % OPTIONS.length]
+            : keyOpt;
+          map[String(q)] = chosenOpt;
+        } else {
+          map[String(q)] = qKey.answers.join('');
+        }
+      }
+    }
+    answersByStudentId[st.id] = map;
+  });
+
+  return generateTwoInOneLJKPdf({
+    mapel: exam.mapel,
+    kelasLabel: exam.kelas,
+    namaUjian: exam.namaUjian,
+    students,
+    exam,
+    answersByStudentId,
+    filePrefix: 'LJK_Arsiran_Jawaban',
+    onNotify,
+  });
 }
 
 /**
@@ -415,7 +555,7 @@ export async function generateClassLJKPdf(
 }
 
 /**
- * Render 1 lembar LJK Setengah A4 Hitam Putih (Default 40 Soal) ke Canvas (1050 x 742 px)
+ * Render 1 lembar LJK Setengah A4 Hitam Putih Lengkap (Default 40 Soal) ke Canvas (1050 x 742 px)
  */
 export async function renderFilledLJKToCanvas(
   canvas: HTMLCanvasElement,
@@ -428,6 +568,10 @@ export async function renderFilledLJKToCanvas(
   const ctx = canvas.getContext('2d')!;
   const scaleX = canvas.width / HALF_W;
   const scaleY = canvas.height / HALF_H;
+
+  const cleanNamaSiswa = (student.nama || `PESERTA NO. ${student.presensi || '01'}`).trim();
+  const cleanKelasSiswa = (student.kelas || exam.kelas || 'KELAS 10').trim();
+  const cleanPresensiSiswa = (student.presensi || '01').trim().padStart(2, '0');
 
   // Latar kertas putih bersih
   ctx.fillStyle = '#ffffff';
@@ -452,34 +596,39 @@ export async function renderFilledLJKToCanvas(
   ctx.textAlign = 'left';
   ctx.fillStyle = '#000000';
   ctx.font = 'bold 17px sans-serif';
-  ctx.fillText('LEMBAR JAWABAN KOMPUTER (LJK)', 21 * scaleX, 11.3 * scaleY);
+  ctx.fillText('LEMBAR JAWABAN KOMPUTER (LJK)', 20.5 * scaleX, 11.2 * scaleY);
 
   ctx.fillStyle = '#262626';
-  ctx.font = '12.5px sans-serif';
+  ctx.font = '12px sans-serif';
   ctx.fillText(
-    fitCanvasText(ctx, `${exam.namaUjian.toUpperCase()}  •  SISTEM PEMINDAI OMR KAMERA`, 122 * scaleX),
-    21 * scaleX,
-    15.1 * scaleY
+    fitCanvasText(ctx, `${exam.namaUjian.toUpperCase()}  •  FORMULIR OMR STANDAR`, 108 * scaleX),
+    20.5 * scaleX,
+    14.9 * scaleY
   );
 
-  // Badge Kelas di Kanan Kop
+  // Badge Kelas Lebar di Kanan Kop
   ctx.strokeStyle = '#000000';
   ctx.lineWidth = 1.5;
-  ctx.strokeRect(147 * scaleX, 8.4 * scaleY, 41 * scaleX, 6.8 * scaleY);
+  ctx.strokeRect(131 * scaleX, 8.3 * scaleY, 57.5 * scaleX, 7 * scaleY);
   ctx.fillStyle = '#000000';
-  ctx.font = 'bold 13px sans-serif';
+  ctx.font = 'bold 12.5px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(
-    fitCanvasText(ctx, `${student.kelas.toUpperCase()} • NO. ${student.presensi}`, 38 * scaleX),
-    167.5 * scaleX,
-    13 * scaleY
+    fitCanvasText(
+      ctx,
+      `${cleanKelasSiswa.toUpperCase()}  •  NO. ${cleanPresensiSiswa}`,
+      54.5 * scaleX
+    ),
+    159.75 * scaleX,
+    12.9 * scaleY
   );
 
-  // 3. Tabel Identitas Siswa Hitam Putih
+  // 3. Tabel Identitas Siswa 4 Baris Lengkap (Nama Siswa & Kelas Lebar 78mm)
   const tableX = 18;
-  const tableY = 19;
+  const tableY = 18.6;
   const tableW = 144;
-  const rowH = 6.2;
+  const rowH = 4.9;
+  const footerH = 5.4;
 
   ctx.strokeStyle = '#000000';
   ctx.lineWidth = 1.5;
@@ -487,106 +636,116 @@ export async function renderFilledLJKToCanvas(
     tableX * scaleX,
     tableY * scaleY,
     tableW * scaleX,
-    (rowH * 3 + 5.8) * scaleY
+    (rowH * 4 + footerH) * scaleY
   );
 
-  // Garis Horizontal & Vertikal Tabel Identitas
-  [1, 2, 3].forEach((r) => {
+  [1, 2, 3, 4].forEach((r) => {
     ctx.beginPath();
     ctx.moveTo(tableX * scaleX, (tableY + rowH * r) * scaleY);
     ctx.lineTo((tableX + tableW) * scaleX, (tableY + rowH * r) * scaleY);
     ctx.stroke();
   });
-  [30, 100, 121].forEach((offsetX) => {
+  [27, 105, 125].forEach((offsetX) => {
     ctx.beginPath();
     ctx.moveTo((tableX + offsetX) * scaleX, tableY * scaleY);
-    ctx.lineTo((tableX + offsetX) * scaleX, (tableY + rowH * 3) * scaleY);
+    ctx.lineTo((tableX + offsetX) * scaleX, (tableY + rowH * 4) * scaleY);
     ctx.stroke();
   });
 
-  // Baris 1: Nama Siswa & Presensi
+  // Baris 1: Nama Siswa Lengkap & Presensi
   ctx.textAlign = 'left';
-  ctx.font = 'bold 12.5px sans-serif';
+  ctx.font = 'bold 11.5px sans-serif';
   ctx.fillStyle = '#000000';
-  ctx.fillText('NAMA SISWA', (tableX + 2) * scaleX, (tableY + 4.3) * scaleY);
+  ctx.fillText('NAMA SISWA', (tableX + 2) * scaleX, (tableY + 3.5) * scaleY);
 
   ctx.font = 'bold 13.5px sans-serif';
   ctx.fillText(
-    fitCanvasText(ctx, student.nama.toUpperCase(), 66 * scaleX),
-    (tableX + 32) * scaleX,
-    (tableY + 4.3) * scaleY
+    fitCanvasText(ctx, cleanNamaSiswa.toUpperCase(), 74.5 * scaleX),
+    (tableX + 29) * scaleX,
+    (tableY + 3.5) * scaleY
   );
 
-  ctx.font = 'bold 12px sans-serif';
-  ctx.fillText('PRESENSI', (tableX + 102) * scaleX, (tableY + 4.3) * scaleY);
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('PRESENSI', (tableX + 107) * scaleX, (tableY + 3.5) * scaleY);
 
   ctx.textAlign = 'center';
-  ctx.font = 'bold 13.5px sans-serif';
+  ctx.font = 'bold 14px sans-serif';
   ctx.fillText(
-    fitCanvasText(ctx, student.presensi, 19 * scaleX),
-    (tableX + 132.5) * scaleX,
-    (tableY + 4.3) * scaleY
+    fitCanvasText(ctx, cleanPresensiSiswa, 16 * scaleX),
+    (tableX + 134.5) * scaleX,
+    (tableY + 3.5) * scaleY
   );
 
-  // Baris 2: Mata Pelajaran & Kelas
+  // Baris 2: Kelas / Rombel Lengkap & Jml Soal
   ctx.textAlign = 'left';
-  ctx.font = 'bold 12.5px sans-serif';
-  ctx.fillText('MATA PELAJARAN', (tableX + 2) * scaleX, (tableY + rowH + 4.3) * scaleY);
+  ctx.font = 'bold 11.5px sans-serif';
+  ctx.fillText('KELAS / ROMBEL', (tableX + 2) * scaleX, (tableY + rowH + 3.5) * scaleY);
 
-  ctx.font = 'bold 13.5px sans-serif';
-  ctx.fillText(
-    fitCanvasText(ctx, exam.mapel.toUpperCase(), 66 * scaleX),
-    (tableX + 32) * scaleX,
-    (tableY + rowH + 4.3) * scaleY
-  );
-
-  ctx.font = 'bold 12px sans-serif';
-  ctx.fillText('KELAS', (tableX + 102) * scaleX, (tableY + rowH + 4.3) * scaleY);
-
-  ctx.textAlign = 'center';
   ctx.font = 'bold 13px sans-serif';
   ctx.fillText(
-    fitCanvasText(ctx, student.kelas.toUpperCase(), 20 * scaleX),
-    (tableX + 132.5) * scaleX,
-    (tableY + rowH + 4.3) * scaleY
+    fitCanvasText(ctx, cleanKelasSiswa.toUpperCase(), 74.5 * scaleX),
+    (tableX + 29) * scaleX,
+    (tableY + rowH + 3.5) * scaleY
   );
 
-  // Baris 3: Paket Ujian & Jumlah Soal
-  ctx.textAlign = 'left';
-  ctx.font = 'bold 12.5px sans-serif';
-  ctx.fillText('PAKET UJIAN', (tableX + 2) * scaleX, (tableY + rowH * 2 + 4.3) * scaleY);
-
-  ctx.font = '13px sans-serif';
-  ctx.fillText(
-    fitCanvasText(ctx, exam.namaUjian.toUpperCase(), 66 * scaleX),
-    (tableX + 32) * scaleX,
-    (tableY + rowH * 2 + 4.3) * scaleY
-  );
-
-  ctx.font = 'bold 12px sans-serif';
-  ctx.fillText('JML SOAL', (tableX + 102) * scaleX, (tableY + rowH * 2 + 4.3) * scaleY);
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('JML SOAL', (tableX + 107) * scaleX, (tableY + rowH + 3.5) * scaleY);
 
   ctx.textAlign = 'center';
-  ctx.font = 'bold 12.5px sans-serif';
+  ctx.font = 'bold 12px sans-serif';
   ctx.fillText(
     `${exam.jumlahSoal} / 40`,
-    (tableX + 132.5) * scaleX,
-    (tableY + rowH * 2 + 4.3) * scaleY
+    (tableX + 134.5) * scaleX,
+    (tableY + rowH + 3.5) * scaleY
   );
 
-  // Baris 4: Petunjuk
+  // Baris 3: Mata Pelajaran & Status
   ctx.textAlign = 'left';
-  ctx.font = 'bold 11px sans-serif';
+  ctx.font = 'bold 11.5px sans-serif';
+  ctx.fillText('MATA PELAJARAN', (tableX + 2) * scaleX, (tableY + rowH * 2 + 3.5) * scaleY);
+
+  ctx.font = 'bold 12.5px sans-serif';
   ctx.fillText(
-    'PETUNJUK: Hitamkan bulatan jawaban secara penuh. Kamera otomatis mendeteksi nama, kelas, nomor & jawaban.',
-    (tableX + 2.5) * scaleX,
-    (tableY + rowH * 3 + 3.9) * scaleY
+    fitCanvasText(ctx, exam.mapel.toUpperCase(), 74.5 * scaleX),
+    (tableX + 29) * scaleX,
+    (tableY + rowH * 2 + 3.5) * scaleY
+  );
+
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('STATUS', (tableX + 107) * scaleX, (tableY + rowH * 2 + 3.5) * scaleY);
+
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('UTAMA', (tableX + 134.5) * scaleX, (tableY + rowH * 2 + 3.5) * scaleY);
+
+  // Baris 4: Paket Ujian & Paraf
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 11.5px sans-serif';
+  ctx.fillText('PAKET UJIAN', (tableX + 2) * scaleX, (tableY + rowH * 3 + 3.5) * scaleY);
+
+  ctx.font = '12px sans-serif';
+  ctx.fillText(
+    fitCanvasText(ctx, exam.namaUjian.toUpperCase(), 74.5 * scaleX),
+    (tableX + 29) * scaleX,
+    (tableY + rowH * 3 + 3.5) * scaleY
+  );
+
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('PARAF', (tableX + 107) * scaleX, (tableY + rowH * 3 + 3.5) * scaleY);
+
+  // Baris 5: Petunjuk
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 10.5px sans-serif';
+  ctx.fillText(
+    'PETUNJUK: Hitamkan bulatan jawaban secara penuh & rapi. Kamera otomatis membaca QR Identitas (Nama, Kelas, Presensi) & Jawaban.',
+    (tableX + 2.2) * scaleX,
+    (tableY + rowH * 4 + 3.7) * scaleY
   );
 
   // 4. QR Code Box Hitam Putih
   ctx.strokeStyle = '#000000';
   ctx.lineWidth = 1.5;
-  ctx.strokeRect(164 * scaleX, tableY * scaleY, 26 * scaleX, (rowH * 3 + 5.8) * scaleY);
+  ctx.strokeRect(164 * scaleX, tableY * scaleY, 26 * scaleX, (rowH * 4 + footerH) * scaleY);
   ctx.beginPath();
   ctx.moveTo(164 * scaleX, (tableY + 3.8) * scaleY);
   ctx.lineTo(190 * scaleX, (tableY + 3.8) * scaleY);
@@ -599,9 +758,9 @@ export async function renderFilledLJKToCanvas(
 
   const qrPayload = JSON.stringify({
     sId: student.id,
-    prs: student.presensi,
-    nm: student.nama.slice(0, 34),
-    kls: student.kelas,
+    prs: cleanPresensiSiswa,
+    nm: cleanNamaSiswa.slice(0, 48),
+    kls: cleanKelasSiswa.slice(0, 45),
     mpl: exam.mapel,
     jml: exam.jumlahSoal,
     eId: exam.id,
@@ -616,7 +775,7 @@ export async function renderFilledLJKToCanvas(
     qrImg.onload = () => resolve();
     qrImg.src = qrDataUrl;
   });
-  ctx.drawImage(qrImg, 166.5 * scaleX, (tableY + 4.1) * scaleY, 21 * scaleX, 20.1 * scaleY);
+  ctx.drawImage(qrImg, 166.5 * scaleX, (tableY + 4.3) * scaleY, 21 * scaleX, 20.2 * scaleY);
 
   // 5. Header 4 Kolom Hitam Putih Tanpa Zebra
   const colStartX = [27, 70, 113, 156];

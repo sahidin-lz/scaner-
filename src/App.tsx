@@ -21,7 +21,6 @@ import {
   BarChart3,
   X,
   ShieldCheck,
-  GraduationCap,
   Lock,
 } from 'lucide-react';
 import {
@@ -121,12 +120,43 @@ const INDONESIAN_SUBJECTS: Subject[] = [
   { id: 'sub_aa', kode: 'AA', namaMapel: 'Akidah Akhlak', jenjang: 'Kelas 10, 11 & 12', defaultSoal: 40 },
   { id: 'sub_fik', kode: 'FIK', namaMapel: 'Fikih', jenjang: 'Kelas 10, 11 & 12', defaultSoal: 40 },
   { id: 'sub_ski', kode: 'SKI', namaMapel: 'Sejarah Kebudayaan Islam (SKI)', jenjang: 'Kelas 10, 11 & 12', defaultSoal: 40 },
-
-  // Kelompok Kejuruan SMK
-  { id: 'sub_dasar_smk', kode: 'DDPK', namaMapel: 'Dasar-Dasar Program Keahlian (SMK)', jenjang: 'Kelas 10', defaultSoal: 40 },
-  { id: 'sub_kk_smk11', kode: 'KONS-11', namaMapel: 'Konsentrasi Keahlian SMK (Kelas 11)', jenjang: 'Kelas 11', defaultSoal: 40 },
-  { id: 'sub_kk_smk12', kode: 'KONS-12', namaMapel: 'Konsentrasi Keahlian SMK (Kelas 12)', jenjang: 'Kelas 12', defaultSoal: 40 },
 ];
+
+const SAMPLE_DUMMY_NAMES = new Set([
+  'aditya pratama',
+  'bunga citra lestari',
+  'cahyo nugroho',
+  'dinda kirana putri',
+  'eko prasetyo',
+  'farhan maulana',
+]);
+
+function isDummyOrNonTemplateKelas10Roster(kelas: string, siswaMap?: Record<string, Student>): boolean {
+  const cleanKls = (kelas || '').trim();
+  const lowerKls = cleanKls.toLowerCase();
+  // Hapus kelas generik bawaan ('Kelas 10', 'Kelas 11', 'Kelas 12', 'XI-A', 'XI-B') atau kelas selain Kelas 10 template
+  if (
+    !cleanKls ||
+    lowerKls === 'kelas 10' ||
+    lowerKls === 'kelas 11' ||
+    lowerKls === 'kelas 12' ||
+    lowerKls === 'xi-a' ||
+    lowerKls === 'xi-b' ||
+    !/\b(10|x)\b/i.test(cleanKls)
+  ) {
+    return true;
+  }
+  if (siswaMap) {
+    const entries = Object.values(siswaMap);
+    if (entries.length === 0) return true;
+    const allDummy = entries.every((s) => {
+      const n = (s?.nama || '').trim().toLowerCase();
+      return !n || n.startsWith('peserta ') || SAMPLE_DUMMY_NAMES.has(n);
+    });
+    if (allDummy) return true;
+  }
+  return false;
+}
 
 function isSubjectMatchingJenjang(sub: Subject, selectedJenjang: string): boolean {
   if (selectedJenjang === 'SEMUA') return true;
@@ -194,17 +224,31 @@ const DEFAULT_STARTER_EXAM: Exam = {
   }, {}),
 };
 
-function loadCachedExams(): Exam[] {
+function ensureOneTimeCleanLocalStorage() {
   try {
-    const raw = localStorage.getItem('evalscan_local_exams');
-    if (raw) {
-      const parsed = JSON.parse(raw) as Exam[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    if (localStorage.getItem('evalscan_clean_local_v3') !== 'true') {
+      localStorage.removeItem('evalscan_local_exams');
+      localStorage.removeItem('evalscan_local_result_bundles');
+      localStorage.setItem('evalscan_starter_deleted', 'true');
+      localStorage.setItem('evalscan_clean_local_v3', 'true');
     }
   } catch {
     // Abaikan error storage
   }
-  return [DEFAULT_STARTER_EXAM];
+}
+
+function loadCachedExams(): Exam[] {
+  ensureOneTimeCleanLocalStorage();
+  try {
+    const raw = localStorage.getItem('evalscan_local_exams');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Exam[];
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // Abaikan error storage
+  }
+  return [];
 }
 
 function saveCachedExams(list: Exam[]) {
@@ -234,13 +278,16 @@ interface ClassResultBundleDoc {
 }
 
 function loadCachedRosterBundles(): Map<string, ClassRosterDoc> {
+  ensureOneTimeCleanLocalStorage();
   const map = new Map<string, ClassRosterDoc>();
   try {
     const raw = localStorage.getItem('evalscan_local_roster_bundles');
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, ClassRosterDoc>;
       for (const [k, v] of Object.entries(parsed)) {
-        if (v && v.kelas) map.set(k, v);
+        if (v && v.kelas && !isDummyOrNonTemplateKelas10Roster(v.kelas, v.siswaMap)) {
+          map.set(k, v);
+        }
       }
     }
   } catch {
@@ -533,17 +580,34 @@ export default function App() {
       rostersQuery,
       { includeMetadataChanges: false },
       (snap) => {
+        const shouldPurgeRosters =
+          localStorage.getItem('evalscan_clean_rosters_v3') !== 'true';
         for (const change of snap.docChanges()) {
           if (change.type === 'removed') {
             rosterBundlesRef.current.delete(change.doc.id);
           } else {
             const data = change.doc.data() as ClassRosterDoc;
-            rosterBundlesRef.current.set(change.doc.id, {
-              schoolId: data.schoolId || SCHOOL_ID,
-              ownerId: data.ownerId || 'public_school',
-              kelas: data.kelas,
-              siswaMap: data.siswaMap || {},
-            });
+            if (
+              shouldPurgeRosters &&
+              isDummyOrNonTemplateKelas10Roster(data.kelas, data.siswaMap)
+            ) {
+              rosterBundlesRef.current.delete(change.doc.id);
+              deleteDoc(doc(db, 'class_rosters', change.doc.id)).catch(() => {});
+            } else {
+              rosterBundlesRef.current.set(change.doc.id, {
+                schoolId: data.schoolId || SCHOOL_ID,
+                ownerId: data.ownerId || 'public_school',
+                kelas: data.kelas,
+                siswaMap: data.siswaMap || {},
+              });
+            }
+          }
+        }
+        if (shouldPurgeRosters) {
+          try {
+            localStorage.setItem('evalscan_clean_rosters_v3', 'true');
+          } catch {
+            // Abaikan error storage
           }
         }
         rebuildStudentsFromBundles();
@@ -585,7 +649,23 @@ export default function App() {
       examsQuery,
       { includeMetadataChanges: false },
       (snap) => {
-        if (snap.empty && snap.docChanges().length === 0) return;
+        const shouldPurgeExams =
+          localStorage.getItem('evalscan_clean_exams_v3') !== 'true';
+        if (shouldPurgeExams) {
+          for (const d of snap.docs) {
+            deleteDoc(doc(db, 'exams', d.id)).catch(() => {});
+          }
+          try {
+            localStorage.setItem('evalscan_clean_exams_v3', 'true');
+          } catch {
+            // Abaikan error storage
+          }
+          setExams([]);
+          saveCachedExams([]);
+          setSelectedExamId('');
+          return;
+        }
+
         setExams((prev) => {
           const map = new Map<string, Exam>(prev.map((item) => [item.id, item]));
           for (const change of snap.docChanges()) {
@@ -598,11 +678,10 @@ export default function App() {
               });
             }
           }
-          const list = Array.from(map.values());
-          const finalExams = list.length > 0 ? list : [DEFAULT_STARTER_EXAM];
+          const finalExams = Array.from(map.values());
           saveCachedExams(finalExams);
           setSelectedExamId((curr) =>
-            finalExams.some((e) => e.id === curr) ? curr : finalExams[0].id
+            finalExams.some((e) => e.id === curr) ? curr : finalExams[0]?.id || ''
           );
           return finalExams;
         });
@@ -618,6 +697,22 @@ export default function App() {
       classResultsQuery,
       { includeMetadataChanges: false },
       (snap) => {
+        const shouldPurgeResults =
+          localStorage.getItem('evalscan_clean_results_v3') !== 'true';
+        if (shouldPurgeResults) {
+          for (const d of snap.docs) {
+            resultBundlesRef.current.delete(d.id);
+            deleteDoc(doc(db, 'class_results', d.id)).catch(() => {});
+          }
+          try {
+            localStorage.setItem('evalscan_clean_results_v3', 'true');
+          } catch {
+            // Abaikan error storage
+          }
+          rebuildResultsFromBundles();
+          return;
+        }
+
         for (const change of snap.docChanges()) {
           if (change.type === 'removed') {
             resultBundlesRef.current.delete(change.doc.id);
@@ -651,12 +746,13 @@ export default function App() {
     };
   }, [authReady, rebuildStudentsFromBundles, rebuildResultsFromBundles]);
 
-  const selectedExam =
-    exams.find((e) => e.id === selectedExamId) || exams[0] || DEFAULT_STARTER_EXAM;
+  const selectedExam: Exam | null =
+    exams.find((e) => e.id === selectedExamId) || exams[0] || null;
+  const scannerActiveExam: Exam = selectedExam || DEFAULT_STARTER_EXAM;
   const uniqueClasses = Array.from(new Set(students.map((s) => s.kelas))).sort();
 
   const allClassOptions = React.useMemo(() => {
-    const set = new Set<string>(['Kelas 10', 'Kelas 11', 'Kelas 12']);
+    const set = new Set<string>();
     students.forEach((s) => {
       if (s.kelas) set.add(s.kelas);
     });
@@ -666,7 +762,10 @@ export default function App() {
     results.forEach((r) => {
       if (r.kelas) set.add(r.kelas);
     });
-    return Array.from(set);
+    if (set.size === 0) {
+      return ['Kelas 10'];
+    }
+    return Array.from(set).sort();
   }, [students, exams, results]);
 
   const guruSubjectsByJenjang = React.useMemo(
@@ -1082,6 +1181,24 @@ export default function App() {
     }
   }
 
+  async function handleDeleteClassStudents(targetKelas: string) {
+    const cleanKelas = targetKelas.trim();
+    if (!cleanKelas) return;
+    const rosterId = getRosterDocId(cleanKelas);
+    setLoading(true);
+    try {
+      await deleteDoc(doc(db, 'class_rosters', rosterId));
+      rosterBundlesRef.current.delete(rosterId);
+      rebuildStudentsFromBundles();
+      setFilterKelasSiswa('SEMUA');
+      showNotification(`Seluruh data siswa kelas "${cleanKelas}" telah dihapus.`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `class_rosters/${rosterId}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleClearAllStudents() {
     if (rosterBundlesRef.current.size === 0) return;
     setLoading(true);
@@ -1107,8 +1224,30 @@ export default function App() {
     if (!file) return;
     setLoading(true);
     try {
-      let activeMapel = mapelGuru;
-      if (isCustomGuruMapel) {
+      const {
+        kunciMap,
+        jumlahSoal: total,
+        detectedMapel,
+        detectedKelas,
+        detectedNamaUjian,
+      } = await parseAnswerKeyExcel(file, bobotPG, bobotPGK);
+      if (total < 1 || total > 40) {
+        showNotification('Jumlah soal pada Excel harus antara 1 sampai 40 soal.', 'warning');
+        return;
+      }
+
+      let activeMapel = detectedMapel || mapelGuru;
+      if (detectedMapel) {
+        const saved = await saveNewSubjectRecord(
+          detectedMapel,
+          undefined,
+          detectedKelas || jenjangGuruFilter
+        );
+        if (saved) {
+          activeMapel = saved;
+          setMapelGuru(saved);
+        }
+      } else if (isCustomGuruMapel) {
         if (!customGuruMapelText.trim()) {
           showNotification('Mohon ketik nama mata pelajaran terlebih dahulu.', 'warning');
           return;
@@ -1126,18 +1265,18 @@ export default function App() {
         }
       }
 
-      const rawKelas = isCustomGuruKelas ? customGuruKelasText.trim() : kelasGuru.trim();
+      const rawKelas =
+        detectedKelas || (isCustomGuruKelas ? customGuruKelasText.trim() : kelasGuru.trim());
       const targetKelas = (
         rawKelas ||
         (jenjangGuruFilter !== 'SEMUA' ? jenjangGuruFilter : uniqueClasses[0] || 'Kelas 10')
       ).slice(0, 50);
 
-      const { kunciMap, jumlahSoal: total } = await parseAnswerKeyExcel(file, bobotPG, bobotPGK);
-      if (total < 1 || total > 40) {
-        showNotification('Jumlah soal pada Excel harus antara 1 sampai 40 soal.', 'warning');
-        return;
-      }
-      const cleanNamaUjian = (namaUjian.trim() || 'Penilaian Sekolah').slice(0, 120);
+      const cleanNamaUjian = (
+        detectedNamaUjian ||
+        namaUjian.trim() ||
+        'Penilaian Sekolah'
+      ).slice(0, 120);
       const cleanMapel = activeMapel.trim().slice(0, 100);
       const examDocId = `ex_${cleanMapel.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}_${targetKelas.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`;
 
@@ -1156,7 +1295,14 @@ export default function App() {
         return next;
       });
       setSelectedExamId(examDocId);
+      setKelasGuru(targetKelas);
+      setNamaUjian(cleanNamaUjian);
       setJumlahSoal(total);
+      const orderedKeys = Array.from({ length: total }, (_, idx) => {
+        const k = kunciMap[String(idx + 1)];
+        return k ? k.answers.join('') : 'A';
+      });
+      setKunciText(orderedKeys.join(' '));
       setIsCustomGuruKelas(false);
 
       setDoc(doc(db, 'exams', examDocId), {
@@ -1174,7 +1320,7 @@ export default function App() {
       });
 
       showNotification(
-        `Kunci jawaban ${cleanMapel} (${targetKelas} · ${total} soal aktif) berhasil disimpan!`
+        `Kunci jawaban LJK ${cleanMapel} (${targetKelas} · ${total} soal aktif) otomatis tersimpan!`
       );
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'exams');
@@ -1272,18 +1418,111 @@ export default function App() {
   }
 
   async function handleDeleteExam(id: string) {
+    const targetExam = exams.find((e) => e.id === id);
+    try {
+      localStorage.setItem('evalscan_starter_deleted', 'true');
+    } catch {
+      // Abaikan error storage
+    }
+
     setExams((prev) => {
       const filtered = prev.filter((e) => e.id !== id);
-      const next = filtered.length > 0 ? filtered : [DEFAULT_STARTER_EXAM];
-      saveCachedExams(next);
+      saveCachedExams(filtered);
       if (selectedExamId === id) {
-        setSelectedExamId(next[0]?.id || DEFAULT_STARTER_EXAM.id);
+        setSelectedExamId(filtered[0]?.id || '');
       }
-      return next;
+      return filtered;
     });
-    deleteDoc(doc(db, 'exams', id)).catch((error) => {
+
+    // Hapus juga bundel rekap nilai yang terkait dengan paket ujian PAS ini agar bersih
+    const relatedBundleIds: string[] = [];
+    for (const [bId, bundle] of resultBundlesRef.current.entries()) {
+      if (bundle.examId === id) {
+        relatedBundleIds.push(bId);
+        resultBundlesRef.current.delete(bId);
+        pendingBundleIdsRef.current.delete(bId);
+      }
+    }
+    if (relatedBundleIds.length > 0) {
+      rebuildResultsFromBundles();
+    }
+
+    try {
+      await deleteDoc(doc(db, 'exams', id));
+      for (const bId of relatedBundleIds) {
+        deleteDoc(doc(db, 'class_results', bId)).catch(() => {});
+      }
+    } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `exams/${id}`);
-    });
+    }
+
+    showNotification(
+      `Data ujian "${targetExam?.namaUjian || 'PAS'} - ${targetExam?.mapel || ''}" (${targetExam?.kelas || ''}) beserta rekap nilainya berhasil dihapus.`
+    );
+  }
+
+  async function handleClearAllExams() {
+    try {
+      localStorage.setItem('evalscan_starter_deleted', 'true');
+    } catch {
+      // Abaikan error storage
+    }
+
+    const examIdsToDelete = exams.map((e) => e.id);
+    setExams([]);
+    saveCachedExams([]);
+    setSelectedExamId('');
+
+    // Bersihkan juga bundel hasil ujian terkait
+    const bundleIdsToDelete = Array.from(resultBundlesRef.current.keys());
+    resultBundlesRef.current.clear();
+    pendingBundleIdsRef.current.clear();
+    rebuildResultsFromBundles();
+
+    setLoading(true);
+    try {
+      const batch = writeBatch(db);
+      for (const exId of examIdsToDelete) {
+        batch.delete(doc(db, 'exams', exId));
+      }
+      for (const bId of bundleIdsToDelete) {
+        batch.delete(doc(db, 'class_results', bId));
+      }
+      await batch.commit();
+      showNotification('Seluruh data PAS / Paket Ujian dan rekap nilai terkait berhasil dihapus.');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'exams');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleClearAllResults() {
+    const bundleIdsToDelete = Array.from(resultBundlesRef.current.keys());
+    resultBundlesRef.current.clear();
+    pendingBundleIdsRef.current.clear();
+    previewImagesRef.current.clear();
+    rebuildResultsFromBundles();
+    setInspectedResult(null);
+
+    if (bundleIdsToDelete.length === 0) {
+      showNotification('Rekap nilai sudah kosong.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const batch = writeBatch(db);
+      for (const bId of bundleIdsToDelete) {
+        batch.delete(doc(db, 'class_results', bId));
+      }
+      await batch.commit();
+      showNotification('Seluruh rekap nilai hasil scan LJK telah berhasil dihapus.');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'class_results');
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleDeleteResult(id?: string) {
@@ -1449,14 +1688,25 @@ export default function App() {
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
             <button
               type="button"
-              onClick={() => setTab('ujian')}
+              onClick={() => {
+                setRoleMode('guru');
+                setTab('ujian');
+              }}
               className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
                 tab === 'ujian'
                   ? 'border-blue-600 text-slate-900 font-semibold'
                   : 'border-transparent'
               }`}
             >
-              1. Paket Ujian &amp; LJK
+              Daftar Paket Ujian
+            </button>
+            <button
+              type="button"
+              onClick={() => openFullscreenScannerForExam(selectedExam, scanKelasFilter)}
+              className="hover:text-blue-600 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 border-transparent cursor-pointer inline-flex items-center gap-1.5 font-semibold text-blue-600"
+            >
+              <ScanLine className="w-4 h-4" />
+              Mulai Scan
             </button>
             <button
               type="button"
@@ -1467,14 +1717,7 @@ export default function App() {
                   : 'border-transparent'
               }`}
             >
-              2. Rekap &amp; Analisis
-            </button>
-            <button
-              type="button"
-              onClick={() => openFullscreenScannerForExam(selectedExam, scanKelasFilter)}
-              className="hover:text-blue-600 transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 border-transparent cursor-pointer"
-            >
-              Scan LJK
+              Rekap Nilai
             </button>
             {isAdminLoggedIn && (
               <button
@@ -1489,33 +1732,35 @@ export default function App() {
                     : 'border-transparent'
                 }`}
               >
-                3. Master Data
+                Master Data
               </button>
             )}
           </nav>
 
-          {/* Zone 3: 1 primary action (Login Admin / Keluar Admin) */}
-          <div className="flex items-center gap-3 shrink-0">
+          {/* Zone 3: Primary action (Login Admin / Keluar Admin) */}
+          <div className="flex items-center gap-2 shrink-0">
+            {pendingSyncCount > 0 && (
+              <span className="text-[11px] font-mono text-slate-400 hidden sm:inline">
+                Sinkronisasi...
+              </span>
+            )}
             {isAdminLoggedIn ? (
               <button
                 type="button"
                 onClick={handleAdminLogout}
-                className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+                className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <LogOut className="w-3.5 h-3.5 shrink-0" />
-                Keluar Admin ({ADMIN_EMAIL.split('@')[0]})
+                Keluar Admin
               </button>
             ) : (
               <button
                 type="button"
-                onClick={() => {
-                  setAdminLoginError('');
-                  setShowAdminLoginModal(true);
-                }}
-                className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+                onClick={handleRequestAdminMode}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <LogIn className="w-3.5 h-3.5 shrink-0" />
-                Login Admin
+                Admin
               </button>
             )}
           </div>
@@ -1543,7 +1788,7 @@ export default function App() {
             </div>
 
             <p className="text-xs text-slate-500 leading-relaxed">
-              Mode Guru dapat digunakan langsung tanpa login. Silakan masuk sebagai Admin untuk mengelola daftar mata pelajaran beserta jenjang (Kelas 10, 11, 12) dan database induk siswa.
+              Mode Guru dapat digunakan langsung tanpa login. Silakan masuk sebagai Admin untuk mengelola daftar mata pelajaran beserta jenjang (Kelas 10, 11, 12), menghapus data PAS, dan mengelola database induk siswa.
             </p>
 
             {adminLoginError && (
@@ -1602,70 +1847,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content Container (Compact padding on mobile + bottom clearance for mobile thumb-zone nav) */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 pt-3 pb-24 md:py-5 space-y-4">
-        {/* Compact Status & Quick Action Bar */}
-        <div className="bg-white border border-slate-200 rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-600">
-              <span className="truncate">
-                {roleMode === 'guru' ? 'Mode Guru (Tanpa Login)' : 'Mode Admin'}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums text-slate-500">
-                {pendingSyncCount > 0 ? 'Sinkronisasi...' : 'Hemat 97% Kuota'}
-              </span>
-            </div>
-            <h1 className="text-sm sm:text-lg font-bold text-slate-900 truncate">
-              {tab === 'ujian'
-                ? 'Paket Ujian, Kunci Soal & Cetak LJK'
-                : tab === 'rekap'
-                ? 'Rekap Nilai, Rapor & Analisis Soal'
-                : 'Master Mata Pelajaran & Siswa'}
-            </h1>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => openFullscreenScannerForExam(selectedExam, scanKelasFilter)}
-              className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap min-h-[40px]"
-            >
-              <ScanLine className="w-4 h-4 shrink-0" />
-              <span>Mulai Scan</span>
-            </button>
-
-            <div className="hidden sm:flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-xl">
-              <button
-                type="button"
-                onClick={() => {
-                  setRoleMode('guru');
-                  if (tab === 'master') setTab('ujian');
-                }}
-                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                  roleMode === 'guru'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <GraduationCap className="w-3.5 h-3.5 shrink-0" />
-                Guru
-              </button>
-              <button
-                type="button"
-                onClick={handleRequestAdminMode}
-                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                  roleMode === 'operator' && isAdminLoggedIn
-                    ? 'bg-slate-900 text-white'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                {isAdminLoggedIn ? 'Master' : 'Admin'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Main Content Container */}
+      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 pt-4 pb-24 md:py-6 space-y-4">
 
         {/* Notification Toast Banner */}
         {banner && (
@@ -1737,6 +1920,8 @@ export default function App() {
             onSaveExamManual={handleSaveExamManual}
             onDeleteExam={handleDeleteExam}
             onDownloadKeyTemplate={downloadAnswerKeyTemplateExcel}
+            onImportStudents={handleImportStudents}
+            onDownloadStudentTemplate={downloadStudentTemplateExcel}
             onStartFullscreenScan={(ex, kls) => openFullscreenScannerForExam(ex, kls)}
             buildFallbackClassStudents={buildFallbackClassStudents}
             showNotification={showNotification}
@@ -1767,6 +1952,7 @@ export default function App() {
             onSelectInspectedResult={setInspectedResult}
             inspectedExam={inspectedExam}
             onDeleteResult={handleDeleteResult}
+            onClearAllResults={handleClearAllResults}
             onGoToExamPage={() => setTab('ujian')}
             onOpenFullscreenScan={(kls) => openFullscreenScannerForExam(selectedExam, kls)}
             showNotification={showNotification}
@@ -1818,8 +2004,14 @@ export default function App() {
             onImportStudents={handleImportStudents}
             onAddStudentManual={handleAddStudentManual}
             onDeleteStudent={handleDeleteStudent}
+            onDeleteClassStudents={handleDeleteClassStudents}
             onClearAllStudents={handleClearAllStudents}
             onDownloadStudentTemplate={downloadStudentTemplateExcel}
+            exams={exams}
+            results={results}
+            onDeleteExam={handleDeleteExam}
+            onClearAllExams={handleClearAllExams}
+            onClearAllResults={handleClearAllResults}
           />
         )}
       </main>
@@ -1881,8 +2073,8 @@ export default function App() {
       {/* FULLSCREEN SCANNER OVERLAY ALA EVALBEE (TERPISAH DARI NAVBAR & REKAP) */}
       {scannerFullscreenOpen && (
         <CameraScanner
-          exam={selectedExam}
-          exams={exams}
+          exam={scannerActiveExam}
+          exams={exams.length > 0 ? exams : [scannerActiveExam]}
           onSelectExamId={setSelectedExamId}
           activeKelas={scanKelasFilter}
           classOptions={allClassOptions}
@@ -1890,20 +2082,20 @@ export default function App() {
           students={students}
           classResults={results.filter(
             (r) =>
-              r.kelas === (scanKelasFilter || selectedExam.kelas) &&
-              (r.examId === selectedExam.id || r.mapel === selectedExam.mapel)
+              r.kelas === (scanKelasFilter || scannerActiveExam.kelas) &&
+              (r.examId === scannerActiveExam.id || r.mapel === scannerActiveExam.mapel)
           )}
           onCloseScanner={() => setScannerFullscreenOpen(false)}
           onResultSaved={async (res) => {
-            const targetExamId = res.examId || selectedExam.id;
-            const targetMapel = (res.mapel || selectedExam.mapel).slice(0, 100);
+            const targetExamId = res.examId || scannerActiveExam.id;
+            const targetMapel = (res.mapel || scannerActiveExam.mapel).slice(0, 100);
             const cleanStudentId = res.studentId
               .replace(/[^a-zA-Z0-9_\-]/g, '_')
               .slice(0, 128);
             const targetSavedKelas = (
               res.kelas ||
               scanKelasFilter ||
-              selectedExam.kelas
+              scannerActiveExam.kelas
             ).slice(0, 50);
             const cleanPresensi = res.presensi.padStart(2, '0').slice(0, 20);
             const resultDocId = `res_${targetExamId}_${targetSavedKelas.replace(/[^a-zA-Z0-9]/g, '_')}_${cleanPresensi.replace(/[^a-zA-Z0-9]/g, '_')}`;

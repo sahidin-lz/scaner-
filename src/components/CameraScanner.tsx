@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Sun,
   PauseCircle,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Exam, Student } from '../lib/ljkGenerator';
 import { OPTIONS } from '../lib/ljkLayout';
@@ -17,6 +18,7 @@ import {
   probeLiveFrame,
   recalculateResultWithManualAnswers,
   ScanResult,
+  OmrSensitivity,
 } from '../lib/omrCameraEngine';
 
 interface Props {
@@ -46,6 +48,7 @@ export default function CameraScanner({
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rawFrameBackupRef = useRef<HTMLCanvasElement | null>(null);
   const probeCanvasRef = useRef<HTMLCanvasElement>(null);
   const nativeCameraInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -58,13 +61,17 @@ export default function CameraScanner({
   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Mode Otomatis di HP: Auto-Jepret aktif, namun Hasil Scan TETAP TAMPIL di layar (tidak langsung hilang) sampai guru klik Simpan
+  // Sensitivitas Pembacaan Jawaban Siswa (Default: Sangat Peka untuk membaca arsiran pensil tipis/silang/centang)
+  const [sensitivity, setSensitivity] = useState<OmrSensitivity>('sangat_peka');
+
+  // Mode Otomatis di HP: Auto-Jepret aktif, Hasil Scan TETAP TAMPIL di layar sampai guru mengecek & klik Simpan
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [autoSavePaused, setAutoSavePaused] = useState(false);
   const [recentSavedToast, setRecentSavedToast] = useState<{
     nama: string;
     presensi: string;
+    kelas: string;
     skor: number;
     benar: number;
   } | null>(null);
@@ -86,33 +93,45 @@ export default function CameraScanner({
   // Tap-to-correct active question number in Bottom Sheet
   const [editingQuestionNo, setEditingQuestionNo] = useState<string | null>(null);
 
-  // Override manual identitas kelas/siswa saat scan agar rekapan rapi per kelas
+  // Identitas kelas/siswa otomatis dari lembar LJK yang sedang di-scan (atau bisa disesuaikan guru)
   const [overrideKelas, setOverrideKelas] = useState<string>(
-    activeKelas || exam.kelas || 'Kelas 10'
+    activeKelas && activeKelas !== 'SEMUA' ? activeKelas : exam.kelas || 'Kelas 10'
   );
   const [overridePresensi, setOverridePresensi] = useState<string>('01');
   const [overrideNama, setOverrideNama] = useState<string>('');
+  const [overrideMapel, setOverrideMapel] = useState<string>(exam.mapel);
 
   useEffect(() => {
-    if (activeKelas && activeKelas !== 'SEMUA') {
-      setOverrideKelas(activeKelas);
-    } else if (exam.kelas) {
-      setOverrideKelas(exam.kelas);
-    }
-  }, [activeKelas, exam.kelas]);
+    setOverrideMapel(exam.mapel);
+  }, [exam.mapel]);
 
   const targetClassForStudents =
-    activeKelas && activeKelas !== 'SEMUA' ? activeKelas : exam.kelas;
-  const classStudents = students.filter((s) => s.kelas === targetClassForStudents);
+    overrideKelas && overrideKelas !== 'SEMUA'
+      ? overrideKelas
+      : activeKelas && activeKelas !== 'SEMUA'
+      ? activeKelas
+      : exam.kelas;
+
+  const classStudents = students.filter(
+    (s) => s.kelas.toLowerCase() === targetClassForStudents.toLowerCase()
+  );
+
+  // Gabungkan daftar kelas agar kelas hasil deteksi QR (misal "10 ALI BIN ABI THALIB") selalu muncul di dropdown
+  const mergedClassOptions = React.useMemo(() => {
+    const set = new Set<string>(classOptions);
+    if (overrideKelas && overrideKelas !== 'SEMUA') set.add(overrideKelas);
+    if (lastResult?.kelas && lastResult.kelas !== 'SEMUA') set.add(lastResult.kelas);
+    return Array.from(set);
+  }, [classOptions, overrideKelas, lastResult?.kelas]);
 
   useEffect(() => {
-    if (classStudents.length > 0 && !overrideNama) {
+    if (!lastResult && classStudents.length > 0 && !overrideNama) {
       const first = classStudents[0];
       setOverridePresensi(first.presensi);
       setOverrideNama(first.nama);
       setOverrideKelas(first.kelas);
     }
-  }, [classStudents, overrideNama]);
+  }, [classStudents, lastResult, overrideNama]);
 
   // Bunyi Beep & Getar ala EvalBee saat LJK berhasil dikunci & dipotret
   const triggerScanFeedback = useCallback(() => {
@@ -167,7 +186,7 @@ export default function CameraScanner({
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setCameraStarting(false);
       setCameraError(
-        'Browser ini membatasi live stream kamera. Gunakan tombol Kamera HP / Ambil Foto di bawah.'
+        'Browser ini membatasi live stream kamera. Gunakan tombol Kamera Sistem / Ambil Foto di bawah.'
       );
       return;
     }
@@ -196,7 +215,6 @@ export default function CameraScanner({
     let acquiredStream: MediaStream | null = null;
     for (const constraints of constraintCandidates) {
       try {
-        // Guard dengan timeout 3.5 detik agar tidak pernah stuck di WebView / browser HP
         const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
         const timeoutPromise = new Promise<null>((resolve) =>
           window.setTimeout(() => resolve(null), 3500)
@@ -214,7 +232,7 @@ export default function CameraScanner({
     if (!acquiredStream) {
       setCameraStarting(false);
       setCameraError(
-        'Izin kamera live belum aktif di browser HP ini. Izinkan akses kamera lalu klik Coba Buka Kamera Lagi, atau langsung tekan tombol Kamera HP / Foto di bawah.'
+        'Izin kamera live belum aktif di browser HP ini. Izinkan akses kamera lalu klik Coba Kamera Live Lagi, atau langsung tekan tombol Kamera Sistem di bawah.'
       );
       return;
     }
@@ -230,7 +248,7 @@ export default function CameraScanner({
       try {
         await videoRef.current.play();
       } catch {
-        // AutoPlay ditangani oleh useEffect & onLoadedMetadata setelah render
+        // AutoPlay ditangani oleh useEffect & onLoadedMetadata
       }
     }
 
@@ -247,7 +265,6 @@ export default function CameraScanner({
     }
   }, [stopCamera]);
 
-  // Pastikan stream terpasang & diputar begitu elemen <video> tampil penuh di layar HP
   useEffect(() => {
     const videoEl = videoRef.current;
     if (videoEl && streamRef.current) {
@@ -260,7 +277,6 @@ export default function CameraScanner({
     }
   }, [cameraOn, lastResult]);
 
-  // Otomatis nyalakan kamera begitu layar scan dibuka
   useEffect(() => {
     startCamera();
     return () => stopCamera();
@@ -281,55 +297,141 @@ export default function CameraScanner({
   }
 
   const advanceToNextPresensi = useCallback(
-    (currentPresensi: string) => {
+    (currentPresensi: string, currentKelas: string) => {
       const nextNum = (parseInt(currentPresensi, 10) || 1) + 1;
       const nextPresensi = String(nextNum).padStart(2, '0');
       setOverridePresensi(nextPresensi);
-      const nextStudent = classStudents.find((s) => s.presensi === nextPresensi);
+      const nextStudent = students.find(
+        (s) =>
+          s.kelas.toLowerCase() === currentKelas.toLowerCase() &&
+          s.presensi.padStart(2, '0') === nextPresensi
+      );
       if (nextStudent) {
         setOverrideNama(nextStudent.nama);
       } else {
-        setOverrideNama(`Peserta ${targetClassForStudents} - No. ${nextPresensi}`);
+        setOverrideNama(`Peserta ${currentKelas} - No. ${nextPresensi}`);
       }
     },
-    [classStudents, targetClassForStudents]
+    [students]
   );
 
+  /**
+   * PRIORITAS UTAMA: Otomatis mendeteksi Nomor Presensi, Nama Siswa, Kelas, dan Mapel
+   * langsung dari lembar jawaban (QR Code / database siswa) yang sedang di-scan!
+   */
   const applyClassAndStudentOverride = useCallback(
     (rawResult: ScanResult): ScanResult => {
-      const chosenKelas =
-        activeKelas && activeKelas !== 'SEMUA'
-          ? activeKelas
-          : rawResult.kelas && rawResult.kelas !== '-'
-          ? rawResult.kelas
-          : exam.kelas || 'Kelas 10';
+      // 1. Jika QR lembar LJK berhasil terbaca, gunakan Kelas, Presensi, Nama & Mapel dari lembar LJK tersebut
+      const hasScannedClass =
+        Boolean(rawResult.qrRead) &&
+        Boolean(rawResult.kelas) &&
+        rawResult.kelas !== '-';
+
+      const chosenKelas = hasScannedClass
+        ? rawResult.kelas
+        : activeKelas && activeKelas !== 'SEMUA'
+        ? activeKelas
+        : rawResult.kelas && rawResult.kelas !== '-'
+        ? rawResult.kelas
+        : exam.kelas || 'Kelas 10';
 
       const cleanPresensi =
         rawResult.presensi && rawResult.presensi !== '-'
-          ? rawResult.presensi
-          : overridePresensi.trim() || '01';
+          ? rawResult.presensi.padStart(2, '0')
+          : overridePresensi.trim().padStart(2, '0') || '01';
 
-      const matchedByPresensi = classStudents.find((s) => s.presensi === cleanPresensi);
+      // Cari nama siswa di daftar siswa untuk kelas & presensi yang terdeteksi
+      const matchedInRoster = students.find(
+        (s) =>
+          s.kelas.toLowerCase() === chosenKelas.toLowerCase() &&
+          s.presensi.padStart(2, '0') === cleanPresensi
+      );
 
       const cleanNama =
         rawResult.nama && !rawResult.nama.includes('Tidak Terbaca')
           ? rawResult.nama
-          : matchedByPresensi?.nama ||
-            overrideNama.trim() ||
-            `Peserta ${chosenKelas} - No. ${cleanPresensi}`;
+          : matchedInRoster?.nama ||
+            (overrideNama.trim() && !overrideNama.startsWith('Peserta ')
+              ? overrideNama.trim()
+              : `Peserta ${chosenKelas} - No. ${cleanPresensi}`);
+
+      const detectedMapelName = rawResult.detectedMapel || rawResult.mapel || exam.mapel;
 
       setOverrideKelas(chosenKelas);
       setOverridePresensi(cleanPresensi);
       setOverrideNama(cleanNama);
+      setOverrideMapel(detectedMapelName);
+
+      // Sinkronkan filter kelas aktif & paket ujian jika lembar LJK memiliki identitas mapel/kelas sendiri
+      if (hasScannedClass && chosenKelas !== activeKelas) {
+        onChangeActiveKelas(chosenKelas);
+      }
+      if (
+        rawResult.detectedExamId &&
+        onSelectExamId &&
+        rawResult.detectedExamId !== exam.id &&
+        exams.some((e) => e.id === rawResult.detectedExamId)
+      ) {
+        onSelectExamId(rawResult.detectedExamId);
+      }
 
       return {
         ...rawResult,
         kelas: chosenKelas,
         presensi: cleanPresensi,
         nama: cleanNama,
+        mapel: detectedMapelName,
       };
     },
-    [activeKelas, classStudents, exam.kelas, overrideNama, overridePresensi]
+    [
+      activeKelas,
+      exam.id,
+      exam.kelas,
+      exam.mapel,
+      exams,
+      onChangeActiveKelas,
+      onSelectExamId,
+      overrideNama,
+      overridePresensi,
+      students,
+    ]
+  );
+
+  // Simpan salinan mentah citra tangkapan agar guru bisa mengubah tingkat sensitivitas secara instan tanpa foto ulang
+  const saveRawCanvasBackup = useCallback((srcCanvas: HTMLCanvasElement) => {
+    const backup = document.createElement('canvas');
+    backup.width = srcCanvas.width;
+    backup.height = srcCanvas.height;
+    const bCtx = backup.getContext('2d');
+    if (bCtx) {
+      bCtx.drawImage(srcCanvas, 0, 0);
+      rawFrameBackupRef.current = backup;
+    }
+  }, []);
+
+  // Fungsi proses ulang gambar yang sedang tampil ketika guru mengganti sensitivitas ('sangat_peka' | 'tinggi' | 'normal')
+  const handleReprocessWithSensitivity = useCallback(
+    (nextSens: OmrSensitivity) => {
+      setSensitivity(nextSens);
+      if (!rawFrameBackupRef.current || !canvasRef.current) return;
+      const workCanvas = canvasRef.current;
+      workCanvas.width = rawFrameBackupRef.current.width;
+      workCanvas.height = rawFrameBackupRef.current.height;
+      const ctx = workCanvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(rawFrameBackupRef.current, 0, 0);
+      const reprocessed = processCameraFrame(workCanvas, exam, students, nextSens, exams);
+      setAutoSavePaused(true);
+      setLastResult((prev) => ({
+        ...reprocessed,
+        kelas: overrideKelas || reprocessed.kelas,
+        presensi: overridePresensi || reprocessed.presensi,
+        nama: overrideNama || reprocessed.nama,
+        mapel: overrideMapel || reprocessed.mapel,
+        qrRead: prev?.qrRead || reprocessed.qrRead,
+      }));
+    },
+    [exam, exams, overrideKelas, overrideMapel, overrideNama, overridePresensi, students]
   );
 
   const handleCapture = useCallback(() => {
@@ -337,7 +439,6 @@ export default function CameraScanner({
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
-    // Jika kamera live belum mengeluarkan frame di browser HP, otomatis buka kamera sistem HP
     if (!cameraOn || video.videoWidth === 0 || video.videoHeight === 0) {
       nativeCameraInputRef.current?.click();
       return;
@@ -362,51 +463,71 @@ export default function CameraScanner({
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     ctx.drawImage(video, startX, startY, cropW, cropH, 0, 0, canvas.width, canvas.height);
 
-    const result = processCameraFrame(canvas, exam, students);
+    saveRawCanvasBackup(canvas);
+
+    const result = processCameraFrame(canvas, exam, students, sensitivity, exams);
     triggerScanFeedback();
     setEditingQuestionNo(null);
     setAutoSavePaused(false);
     setLastResult(applyClassAndStudentOverride(result));
-  }, [applyClassAndStudentOverride, cameraOn, exam, students, triggerScanFeedback]);
+  }, [
+    applyClassAndStudentOverride,
+    cameraOn,
+    exam,
+    exams,
+    saveRawCanvasBackup,
+    sensitivity,
+    students,
+    triggerScanFeedback,
+  ]);
 
   const handleConfirmSave = useCallback(async () => {
     if (!lastResult || saving) return;
     setSaving(true);
     try {
+      const cleanKelas = (overrideKelas || lastResult.kelas || exam.kelas || 'Kelas 10').trim();
+      const cleanPresensi = (overridePresensi || lastResult.presensi || '01')
+        .trim()
+        .padStart(2, '0');
+      const cleanNama = (overrideNama || lastResult.nama || 'Siswa').trim();
+      const cleanMapel = (overrideMapel || lastResult.mapel || exam.mapel).trim();
+
       const finalResult: ScanResult = {
         ...lastResult,
-        kelas: (overrideKelas || lastResult.kelas || exam.kelas || 'Kelas 10').trim(),
-        presensi: (overridePresensi || lastResult.presensi || '01').trim(),
-        nama: (overrideNama || lastResult.nama || 'Siswa').trim(),
+        kelas: cleanKelas,
+        presensi: cleanPresensi,
+        nama: cleanNama,
+        mapel: cleanMapel,
       };
       await onResultSaved(finalResult);
       setRecentSavedToast({
         nama: finalResult.nama,
         presensi: finalResult.presensi,
+        kelas: finalResult.kelas,
         skor: finalResult.skor,
         benar: finalResult.benar,
       });
-      // Beri jeda 2.2 detik sebelum auto-jepret lembar berikutnya agar guru sempat mengganti kertas LJK
       cooldownUntilRef.current = performance.now() + 2200;
       setLastResult(null);
       setEditingQuestionNo(null);
       setAutoSavePaused(false);
-      advanceToNextPresensi(finalResult.presensi);
+      advanceToNextPresensi(finalResult.presensi, finalResult.kelas);
     } finally {
       setSaving(false);
     }
   }, [
     advanceToNextPresensi,
     exam.kelas,
+    exam.mapel,
     lastResult,
     onResultSaved,
     overrideKelas,
+    overrideMapel,
     overrideNama,
     overridePresensi,
     saving,
   ]);
 
-  // Jika guru mengaktifkan Auto-Simpan secara manual, beri waktu 3.2 detik agar tetap sempat melihat hasil
   useEffect(() => {
     if (!lastResult || !autoSaveEnabled || autoSavePaused || editingQuestionNo || saving) {
       return;
@@ -417,7 +538,6 @@ export default function CameraScanner({
     return () => window.clearTimeout(timer);
   }, [autoSaveEnabled, autoSavePaused, editingQuestionNo, handleConfirmSave, lastResult, saving]);
 
-  // Bersihkan notifikasi toast otomatis setelah 3.5 detik
   useEffect(() => {
     if (!recentSavedToast) return;
     const t = window.setTimeout(() => setRecentSavedToast(null), 3500);
@@ -486,7 +606,6 @@ export default function CameraScanner({
                 : nextCornerState
             );
 
-            // Jika LJK terkunci stabil selama 2 siklus (~280ms), otomatis jepret & tampilkan hasil!
             if (autoCaptureEnabled && !inCooldown && consecutiveReady >= 2) {
               consecutiveReady = 0;
               handleCapture();
@@ -515,11 +634,11 @@ export default function CameraScanner({
       img.src = imgUrl;
     });
 
-    // Uji orientasi foto (0 derajat, dan jika foto vertikal/portrait dari HP, uji juga rotasi 90° CW & 90° CCW)
     const orientations: Array<0 | 90 | 270> =
       img.height > img.width ? [0, 90, 270] : [0, 90];
 
     let bestResult: ScanResult | null = null;
+    let bestRawCanvas: HTMLCanvasElement | null = null;
     let bestScoreRank = -1;
 
     for (const angle of orientations) {
@@ -556,17 +675,23 @@ export default function CameraScanner({
         tCtx.restore();
       }
 
-      const candidate = processCameraFrame(testCanvas, exam, students);
+      const rawCopy = document.createElement('canvas');
+      rawCopy.width = 1050;
+      rawCopy.height = 742;
+      rawCopy.getContext('2d')?.drawImage(testCanvas, 0, 0);
+
+      const candidate = processCameraFrame(testCanvas, exam, students, sensitivity, exams);
       const answeredCount = candidate.benar + candidate.salah;
-      const qrBonus = !candidate.nama.includes('Tidak Terbaca') ? 500 : 0;
-      const anchorBonus = candidate.anchorsDetected ? 300 : 0;
-      const rank = qrBonus + anchorBonus + answeredCount * 10 + candidate.benar;
+      const qrBonus = candidate.qrRead ? 600 : 0;
+      const anchorBonus = candidate.anchorsDetected ? 350 : 0;
+      const rank = qrBonus + anchorBonus + answeredCount * 12 + candidate.benar;
 
       if (rank > bestScoreRank) {
         bestScoreRank = rank;
         bestResult = candidate;
+        bestRawCanvas = rawCopy;
       }
-      if (candidate.anchorsDetected && !candidate.nama.includes('Tidak Terbaca')) {
+      if (candidate.anchorsDetected && candidate.qrRead) {
         break;
       }
     }
@@ -574,6 +699,9 @@ export default function CameraScanner({
     URL.revokeObjectURL(imgUrl);
 
     if (bestResult) {
+      if (bestRawCanvas) {
+        rawFrameBackupRef.current = bestRawCanvas;
+      }
       triggerScanFeedback();
       setEditingQuestionNo(null);
       setAutoSavePaused(false);
@@ -586,7 +714,9 @@ export default function CameraScanner({
   function handleTapManualOption(qNo: string, chosenOpt: string) {
     if (!lastResult) return;
     setAutoSavePaused(true);
-    const qKey = exam.kunciJawaban[qNo];
+    const activeEx =
+      (lastResult.examId && exams.find((e) => e.id === lastResult.examId)) || exam;
+    const qKey = activeEx.kunciJawaban[qNo];
     let nextAns = chosenOpt;
 
     if (qKey?.type === 'PGK' && chosenOpt !== '-') {
@@ -602,17 +732,25 @@ export default function CameraScanner({
       ...lastResult.detailJawaban,
       [qNo]: nextAns,
     };
-    setLastResult(recalculateResultWithManualAnswers(lastResult, updatedMap, exam));
+    setLastResult(recalculateResultWithManualAnswers(lastResult, updatedMap, activeEx));
     if (qKey?.type !== 'PGK') {
       setEditingQuestionNo(null);
     }
   }
 
-  const currentKelasLabel = activeKelas !== 'SEMUA' ? activeKelas : overrideKelas;
+  const currentKelasLabel =
+    overrideKelas && overrideKelas !== 'SEMUA'
+      ? overrideKelas
+      : activeKelas !== 'SEMUA'
+      ? activeKelas
+      : exam.kelas;
+
+  const activeGradingExam =
+    (lastResult?.examId && exams.find((e) => e.id === lastResult.examId)) || exam;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col overflow-hidden select-none">
-      {/* Input Kamera Sistem HP Tersembunyi (Selalu siap dipicu jika kamera live tertahan) */}
+      {/* Input Kamera Sistem HP Tersembunyi */}
       <input
         ref={nativeCameraInputRef}
         type="file"
@@ -622,14 +760,14 @@ export default function CameraScanner({
         className="hidden"
       />
 
-      {/* Compact Mobile Top Bar: Pilih Mapel/Ujian, Kelas, Auto-Jepret, Auto-Simpan, Flash & Tutup */}
+      {/* Compact Mobile Top Bar: Pilih Mapel/Ujian, Kelas, Sensitivitas, Auto-Jepret & Tutup */}
       <div className="bg-slate-900/95 border-b border-slate-800 px-2.5 py-2 flex items-center justify-between gap-1.5 shrink-0">
         <div className="flex items-center gap-1.5 min-w-0">
           {exams.length > 1 && onSelectExamId ? (
             <select
               value={exam.id}
               onChange={(e) => onSelectExamId(e.target.value)}
-              className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1 text-xs font-bold cursor-pointer max-w-[130px] sm:max-w-[200px] truncate min-h-[34px]"
+              className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1 text-xs font-bold cursor-pointer max-w-[125px] sm:max-w-[190px] truncate min-h-[34px]"
             >
               {exams.map((ex) => (
                 <option key={ex.id} value={ex.id}>
@@ -652,9 +790,9 @@ export default function CameraScanner({
               onChangeActiveKelas(e.target.value);
               setOverrideKelas(e.target.value);
             }}
-            className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1 text-xs font-semibold cursor-pointer shrink-0 min-h-[34px]"
+            className="bg-slate-800 border border-slate-700 text-white rounded-lg px-2 py-1 text-xs font-semibold cursor-pointer shrink-0 max-w-[115px] sm:max-w-[160px] truncate min-h-[34px]"
           >
-            {classOptions.map((kls) => (
+            {mergedClassOptions.map((kls) => (
               <option key={kls} value={kls}>
                 {kls}
               </option>
@@ -663,6 +801,17 @@ export default function CameraScanner({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          <select
+            value={sensitivity}
+            onChange={(e) => setSensitivity(e.target.value as OmrSensitivity)}
+            className="bg-emerald-950/80 border border-emerald-600/60 text-emerald-300 rounded-lg px-1.5 py-1 text-[10px] font-bold cursor-pointer min-h-[34px]"
+            title="Sensitivitas Deteksi Jawaban Siswa"
+          >
+            <option value="sangat_peka">Peka: Tinggi+</option>
+            <option value="tinggi">Peka: Tinggi</option>
+            <option value="normal">Peka: Normal</option>
+          </select>
+
           <button
             type="button"
             onClick={() => setAutoCaptureEnabled((prev) => !prev)}
@@ -673,20 +822,7 @@ export default function CameraScanner({
             }`}
             title="Otomatis Jepret saat LJK Terdeteksi"
           >
-            {autoCaptureEnabled ? 'Auto-Jepret: ON' : 'Jepret Manual'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setAutoSaveEnabled((prev) => !prev)}
-            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer whitespace-nowrap min-h-[34px] ${
-              autoSaveEnabled
-                ? 'bg-blue-600/25 border border-blue-500/60 text-blue-300'
-                : 'bg-slate-800 border border-slate-700 text-slate-400'
-            }`}
-            title="Jika OFF, hasil scan tetap tampil di layar sampai Anda klik Simpan"
-          >
-            {autoSaveEnabled ? 'Auto-Simpan: ON' : 'Tahan Hasil: ON'}
+            {autoCaptureEnabled ? 'Auto-Jepret' : 'Manual'}
           </button>
 
           {torchSupported && (
@@ -718,13 +854,13 @@ export default function CameraScanner({
         </div>
       </div>
 
-      {/* Notifikasi Lembar Terakhir Tersimpan Otomatis */}
+      {/* Notifikasi Lembar Terakhir Tersimpan */}
       {recentSavedToast && !lastResult && (
         <div className="bg-emerald-950/95 border-b border-emerald-700/70 px-3 py-1.5 flex items-center justify-between text-xs shrink-0">
           <div className="flex items-center gap-1.5 min-w-0">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
             <span className="text-emerald-100 font-semibold truncate">
-              Tersimpan: No.{recentSavedToast.presensi} {recentSavedToast.nama}
+              Tersimpan: No.{recentSavedToast.presensi} {recentSavedToast.nama} ({recentSavedToast.kelas})
             </span>
           </div>
           <span className="font-mono font-bold text-emerald-300 shrink-0 ml-2">
@@ -733,7 +869,7 @@ export default function CameraScanner({
         </div>
       )}
 
-      {/* Main Camera Viewport: Video TIDAK PERNAH display:none agar decoder video iOS/Android selalu aktif */}
+      {/* Main Camera Viewport */}
       <div className="flex-1 relative flex flex-col items-center justify-center p-2.5 sm:p-5 overflow-hidden">
         <div className="relative w-full max-w-2xl aspect-[210/148.5] bg-slate-900 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
           <video
@@ -797,7 +933,7 @@ export default function CameraScanner({
                     ? 'LJK Terkunci Otomatis · Memotret...'
                     : cornerStatus.lockedCount > 0
                     ? `Terdeteksi ${cornerStatus.lockedCount}/4 Sudut · Arahkan Kamera ke LJK`
-                    : 'Arahkan Kamera HP ke Lembar LJK (Otomatis Jepret)'}
+                    : 'Arahkan Kamera HP ke Lembar LJK (Otomatis Deteksi Nama & Jawaban)'}
                 </div>
               </div>
             </div>
@@ -838,7 +974,7 @@ export default function CameraScanner({
           )}
         </div>
 
-        {/* Bottom Thumb-Zone Action Bar di Bawah Kamera (Selalu Aktif & Bisa Dipencet di Semua HP) */}
+        {/* Bottom Thumb-Zone Action Bar di Bawah Kamera */}
         {!lastResult && (
           <div className="mt-3 w-full max-w-md flex items-center gap-2 px-1">
             <button
@@ -873,26 +1009,35 @@ export default function CameraScanner({
         )}
       </div>
 
-      {/* Bottom Sheet Overlay Hasil Scan Instan + Auto-Simpan / Koreksi Ketuk Nomor */}
+      {/* Bottom Sheet Overlay Hasil Scan Instan + Verifikasi Nama, Nomor, Kelas & Nilai */}
       {lastResult && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="bg-white text-slate-900 w-full max-w-xl sm:rounded-2xl rounded-t-2xl border border-slate-200 max-h-[90vh] flex flex-col overflow-hidden">
-            {/* Header Skor & Identitas Siswa */}
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white text-slate-900 w-full max-w-xl sm:rounded-2xl rounded-t-2xl border border-slate-200 max-h-[92vh] flex flex-col overflow-hidden">
+            {/* Header Skor & Identitas Siswa yang Terdeteksi */}
             <div className="bg-slate-900 text-white px-4 py-3.5 flex items-center justify-between gap-3 shrink-0">
               <div className="min-w-0 space-y-0.5">
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-                  <span className="truncate">{exam.mapel}</span>
+                <div className="flex items-center gap-1.5 text-[11px] text-slate-300 flex-wrap">
+                  <span className="font-semibold text-blue-300 truncate">
+                    {overrideMapel || activeGradingExam.mapel}
+                  </span>
                   <span aria-hidden="true">·</span>
-                  <span>{overrideKelas}</span>
+                  <span className="font-semibold text-white">{overrideKelas}</span>
                   <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">No.{overridePresensi}</span>
+                  <span className="font-mono tabular-nums text-emerald-300 font-bold">
+                    No.{overridePresensi}
+                  </span>
+                  {lastResult.qrRead && (
+                    <span className="px-1.5 py-0.5 bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 rounded text-[9px] font-bold">
+                      QR Terbaca Otomatis
+                    </span>
+                  )}
                 </div>
                 <p className="font-bold text-sm sm:text-base truncate">
                   {overrideNama || lastResult.nama}
                 </p>
-                <div className="flex items-center gap-2.5 text-[11px] font-mono tabular-nums">
-                  <span className="text-emerald-400">B:{lastResult.benar}</span>
-                  <span className="text-red-400">S:{lastResult.salah}</span>
+                <div className="flex items-center gap-3 text-xs font-mono tabular-nums">
+                  <span className="text-emerald-400 font-bold">B:{lastResult.benar}</span>
+                  <span className="text-red-400 font-bold">S:{lastResult.salah}</span>
                   <span className="text-slate-300">K:{lastResult.kosong}</span>
                 </div>
               </div>
@@ -905,7 +1050,7 @@ export default function CameraScanner({
               </div>
             </div>
 
-            {/* Banner Status Auto-Simpan Beruntun */}
+            {/* Banner Status Auto-Simpan jika diaktifkan */}
             {autoSaveEnabled && !autoSavePaused && !editingQuestionNo && (
               <div className="bg-blue-600 text-white px-3.5 py-2 flex items-center justify-between gap-2 text-xs shrink-0">
                 <span className="font-semibold">
@@ -922,57 +1067,125 @@ export default function CameraScanner({
               </div>
             )}
 
-            {/* Body Scrollable: Edit Identitas + Foto LJK + Ketuk Nomor untuk Koreksi */}
-            <div className="p-3.5 sm:p-4 overflow-y-auto space-y-3.5 flex-1">
-              <div className="grid grid-cols-12 gap-2 text-xs">
-                <div className="col-span-4">
-                  <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
-                    Kelas
-                  </label>
-                  <select
-                    value={overrideKelas}
-                    onChange={(e) => {
-                      setAutoSavePaused(true);
-                      setOverrideKelas(e.target.value);
-                    }}
-                    className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-900"
-                  >
-                    {classOptions.map((kls) => (
-                      <option key={kls} value={kls}>
-                        {kls}
-                      </option>
-                    ))}
-                  </select>
+            {/* Body Scrollable: Verifikasi Identitas + Sensitivitas + Foto LJK + Ketuk Nomor */}
+            <div className="p-3.5 sm:p-4 overflow-y-auto space-y-3 flex-1">
+              {/* Baris Cek & Koreksi Identitas Siswa (Otomatis Terisi dari QR / Daftar Siswa Kelas) */}
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="font-bold text-slate-800">
+                    Identitas Lembar Jawaban (Verifikasi Guru)
+                  </span>
+                  {students.length > 0 && (
+                    <span className="text-slate-500">
+                      Pilih No. Presensi untuk isi Nama otomatis
+                    </span>
+                  )}
                 </div>
-                <div className="col-span-3">
-                  <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
-                    Presensi
-                  </label>
-                  <input
-                    type="text"
-                    value={overridePresensi}
-                    onFocus={() => setAutoSavePaused(true)}
-                    onChange={(e) => {
-                      setAutoSavePaused(true);
-                      setOverridePresensi(e.target.value);
-                    }}
-                    className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-mono tabular-nums font-bold text-slate-900"
-                  />
+
+                <div className="grid grid-cols-12 gap-2 text-xs">
+                  <div className="col-span-4">
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Kelas
+                    </label>
+                    <input
+                      type="text"
+                      list="scanner-kelas-list"
+                      value={overrideKelas}
+                      onFocus={() => setAutoSavePaused(true)}
+                      onChange={(e) => {
+                        setAutoSavePaused(true);
+                        const nextKls = e.target.value;
+                        setOverrideKelas(nextKls);
+                        const matched = students.find(
+                          (s) =>
+                            s.kelas.toLowerCase() === nextKls.trim().toLowerCase() &&
+                            s.presensi.padStart(2, '0') ===
+                              overridePresensi.trim().padStart(2, '0')
+                        );
+                        if (matched) {
+                          setOverrideNama(matched.nama);
+                        }
+                      }}
+                      className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-900"
+                    />
+                    <datalist id="scanner-kelas-list">
+                      {mergedClassOptions.map((kls) => (
+                        <option key={kls} value={kls} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div className="col-span-3">
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Presensi
+                    </label>
+                    <input
+                      type="text"
+                      value={overridePresensi}
+                      onFocus={() => setAutoSavePaused(true)}
+                      onChange={(e) => {
+                        setAutoSavePaused(true);
+                        const rawVal = e.target.value;
+                        setOverridePresensi(rawVal);
+                        const padded = rawVal.trim().padStart(2, '0');
+                        const matched = students.find(
+                          (s) =>
+                            s.kelas.toLowerCase() === overrideKelas.trim().toLowerCase() &&
+                            s.presensi.padStart(2, '0') === padded
+                        );
+                        if (matched) {
+                          setOverrideNama(matched.nama);
+                        }
+                      }}
+                      className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-mono tabular-nums font-bold text-slate-900"
+                    />
+                  </div>
+
+                  <div className="col-span-5">
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Nama Siswa
+                    </label>
+                    <input
+                      type="text"
+                      value={overrideNama}
+                      onFocus={() => setAutoSavePaused(true)}
+                      onChange={(e) => {
+                        setAutoSavePaused(true);
+                        setOverrideNama(e.target.value);
+                      }}
+                      className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-900"
+                    />
+                  </div>
                 </div>
-                <div className="col-span-5">
-                  <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
-                    Nama Siswa
-                  </label>
-                  <input
-                    type="text"
-                    value={overrideNama}
-                    onFocus={() => setAutoSavePaused(true)}
-                    onChange={(e) => {
-                      setAutoSavePaused(true);
-                      setOverrideNama(e.target.value);
-                    }}
-                    className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-900"
-                  />
+              </div>
+
+              {/* Pengatur Sensitivitas Baca Jawaban Langsung pada Gambar Ini */}
+              <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs">
+                <div className="flex items-center gap-1.5 text-slate-700 font-semibold">
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  <span>Sensitivitas Jawaban:</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { id: 'sangat_peka', label: 'Sangat Peka' },
+                      { id: 'tinggi', label: 'Tinggi' },
+                      { id: 'normal', label: 'Normal' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => handleReprocessWithSensitivity(opt.id)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                        sensitivity === opt.id
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -991,10 +1204,10 @@ export default function CameraScanner({
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[11px]">
                   <span className="font-semibold text-slate-800">
-                    Ketuk Nomor untuk Koreksi Manual (1–{exam.jumlahSoal})
+                    Ketuk Nomor untuk Koreksi Manual (1–{activeGradingExam.jumlahSoal})
                   </span>
                   <span className="text-slate-500 font-mono tabular-nums">
-                    {lastResult.statusRagu ? 'Cek Jawaban Ragu' : 'Valid'}
+                    {lastResult.statusRagu ? 'Cek Jawaban Ragu' : 'Terbaca Valid'}
                   </span>
                 </div>
 
@@ -1002,7 +1215,9 @@ export default function CameraScanner({
                   <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="font-bold text-blue-950">
                       No.{editingQuestionNo.padStart(2, '0')} (Kunci:{' '}
-                      {exam.kunciJawaban[editingQuestionNo]?.answers.join('') || '-'}):
+                      {activeGradingExam.kunciJawaban[editingQuestionNo]?.answers.join('') ||
+                        '-'}
+                      ):
                     </span>
                     <div className="flex items-center gap-1">
                       {OPTIONS.map((opt) => {
@@ -1042,10 +1257,10 @@ export default function CameraScanner({
                 )}
 
                 <div className="grid grid-cols-5 sm:grid-cols-8 gap-1.5 text-xs font-mono tabular-nums">
-                  {Array.from({ length: exam.jumlahSoal }, (_, i) => {
+                  {Array.from({ length: activeGradingExam.jumlahSoal }, (_, i) => {
                     const qNo = String(i + 1);
                     const ans = lastResult.detailJawaban[qNo] || '-';
-                    const keyObj = exam.kunciJawaban[qNo];
+                    const keyObj = activeGradingExam.kunciJawaban[qNo];
                     const expected = keyObj ? keyObj.answers.join('') : '-';
                     const isExact = ans === expected;
                     const isDoubt = ans === 'DOBEL';
@@ -1092,7 +1307,9 @@ export default function CameraScanner({
                 className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs sm:text-sm inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer min-h-[46px]"
               >
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
-                {saving ? 'Menyimpan...' : `Simpan (${overrideKelas}) & Lanjut`}
+                {saving
+                  ? 'Menyimpan...'
+                  : `Simpan (No.${overridePresensi} · ${overrideKelas}) & Lanjut`}
               </button>
               <button
                 type="button"

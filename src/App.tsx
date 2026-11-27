@@ -233,6 +233,83 @@ interface ClassResultBundleDoc {
   hasilMap: Record<string, StoredStudentResult>;
 }
 
+function loadCachedRosterBundles(): Map<string, ClassRosterDoc> {
+  const map = new Map<string, ClassRosterDoc>();
+  try {
+    const raw = localStorage.getItem('evalscan_local_roster_bundles');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, ClassRosterDoc>;
+      for (const [k, v] of Object.entries(parsed)) {
+        if (v && v.kelas) map.set(k, v);
+      }
+    }
+  } catch {
+    // Abaikan error storage
+  }
+  return map;
+}
+
+function saveCachedRosterBundles(map: Map<string, ClassRosterDoc>) {
+  try {
+    const obj: Record<string, ClassRosterDoc> = {};
+    for (const [k, v] of map.entries()) {
+      obj[k] = v;
+    }
+    localStorage.setItem('evalscan_local_roster_bundles', JSON.stringify(obj));
+  } catch {
+    // Abaikan jika kuota localStorage penuh
+  }
+}
+
+function loadCachedResultBundles(): Map<string, ClassResultBundleDoc> {
+  const map = new Map<string, ClassResultBundleDoc>();
+  try {
+    const raw = localStorage.getItem('evalscan_local_result_bundles');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, ClassResultBundleDoc>;
+      for (const [k, v] of Object.entries(parsed)) {
+        if (v && v.kelas) map.set(k, v);
+      }
+    }
+  } catch {
+    // Abaikan error storage
+  }
+  return map;
+}
+
+function saveCachedResultBundles(map: Map<string, ClassResultBundleDoc>) {
+  try {
+    const obj: Record<string, ClassResultBundleDoc> = {};
+    for (const [k, v] of map.entries()) {
+      obj[k] = v;
+    }
+    localStorage.setItem('evalscan_local_result_bundles', JSON.stringify(obj));
+  } catch {
+    // Abaikan jika kuota localStorage penuh
+  }
+}
+
+function loadCachedSubjects(): Subject[] {
+  try {
+    const raw = localStorage.getItem('evalscan_local_subjects');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Subject[];
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // Abaikan error storage
+  }
+  return [];
+}
+
+function saveCachedSubjects(list: Subject[]) {
+  try {
+    localStorage.setItem('evalscan_local_subjects', JSON.stringify(list));
+  } catch {
+    // Abaikan jika kuota localStorage penuh
+  }
+}
+
 export default function App() {
   // Mode awal adalah Mode Guru (Tanpa Login) dengan 3 Menu Inti + Fullscreen Scanner Terpisah
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(() => {
@@ -258,16 +335,38 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
 
   // Data Real-Time dengan Firestore Persistent IndexedDB Cache + Instant Local Fallback untuk Vercel/HP
-  const [students, setStudents] = useState<Student[]>([]);
-  const [dbSubjects, setDbSubjects] = useState<Subject[]>([]);
+  const [students, setStudents] = useState<Student[]>(() => {
+    const map = new Map<string, Student>();
+    for (const bundle of loadCachedRosterBundles().values()) {
+      for (const st of Object.values(bundle.siswaMap || {})) {
+        if (st && st.id) map.set(st.id, st);
+      }
+    }
+    return sortStudentsList(Array.from(map.values()));
+  });
+  const [dbSubjects, setDbSubjects] = useState<Subject[]>(() => loadCachedSubjects());
   const [exams, setExams] = useState<Exam[]>(() => loadCachedExams());
   const [selectedExamId, setSelectedExamId] = useState<string>(() => {
     const initial = loadCachedExams();
     return initial[0]?.id || DEFAULT_STARTER_EXAM.id;
   });
-  const [results, setResults] = useState<ScanResult[]>([]);
+  const [results, setResults] = useState<ScanResult[]>(() => {
+    const map = new Map<string, ScanResult>();
+    for (const bundle of loadCachedResultBundles().values()) {
+      for (const item of Object.values(bundle.hasilMap || {})) {
+        if (item && item.id) {
+          map.set(item.id, { ...item, previewImage: '' });
+        }
+      }
+    }
+    return sortResultsList(Array.from(map.values()));
+  });
   const [loading, setLoading] = useState(false);
   const [banner, setBanner] = useState<{ type: 'success' | 'warning'; text: string } | null>(null);
+
+  useEffect(() => {
+    saveCachedSubjects(dbSubjects);
+  }, [dbSubjects]);
 
   // Gabungkan Mapel Nasional dengan Mapel di Database
   const allSubjects: Subject[] = React.useMemo(() => {
@@ -319,23 +418,24 @@ export default function App() {
   // Scan Kamera HP: Filter Kelas Saat Scan
   const [scanKelasFilter, setScanKelasFilter] = useState<string>('Kelas 10');
 
-  // Rekap & Detail Hasil LJK
+  // Rekap & Detail Hasil LJK (Default 'SEMUA' agar seluruh kelas hasil scan langsung terlihat)
   const [searchRekap, setSearchRekap] = useState('');
-  const [filterKelasRekap, setFilterKelasRekap] = useState('Kelas 10');
+  const [filterKelasRekap, setFilterKelasRekap] = useState('SEMUA');
   const [filterMapelRekap, setFilterMapelRekap] = useState('SEMUA');
   const [inspectedResult, setInspectedResult] = useState<ScanResult | null>(null);
 
   const activeOwnerId = user ? user.uid : 'public_school';
 
   // Ref penyimpanan Bundel Per Kelas (1 Dokumen = 1 Kelas Siswa & 1 Dokumen = 1 Kelas x 1 Mapel Hasil Scan)
-  const rosterBundlesRef = useRef<Map<string, ClassRosterDoc>>(new Map());
-  const resultBundlesRef = useRef<Map<string, ClassResultBundleDoc>>(new Map());
+  const rosterBundlesRef = useRef<Map<string, ClassRosterDoc>>(loadCachedRosterBundles());
+  const resultBundlesRef = useRef<Map<string, ClassResultBundleDoc>>(loadCachedResultBundles());
   const previewImagesRef = useRef<Map<string, string>>(new Map());
   const pendingBundleIdsRef = useRef<Set<string>>(new Set());
   const flushTimerRef = useRef<number | null>(null);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
 
   const rebuildStudentsFromBundles = useCallback(() => {
+    saveCachedRosterBundles(rosterBundlesRef.current);
     const map = new Map<string, Student>();
     for (const bundle of rosterBundlesRef.current.values()) {
       for (const st of Object.values(bundle.siswaMap || {})) {
@@ -348,6 +448,7 @@ export default function App() {
   }, []);
 
   const rebuildResultsFromBundles = useCallback(() => {
+    saveCachedResultBundles(resultBundlesRef.current);
     const map = new Map<string, ScanResult>();
     for (const bundle of resultBundlesRef.current.values()) {
       for (const item of Object.values(bundle.hasilMap || {})) {
@@ -1794,6 +1895,8 @@ export default function App() {
           )}
           onCloseScanner={() => setScannerFullscreenOpen(false)}
           onResultSaved={async (res) => {
+            const targetExamId = res.examId || selectedExam.id;
+            const targetMapel = (res.mapel || selectedExam.mapel).slice(0, 100);
             const cleanStudentId = res.studentId
               .replace(/[^a-zA-Z0-9_\-]/g, '_')
               .slice(0, 128);
@@ -1802,19 +1905,19 @@ export default function App() {
               scanKelasFilter ||
               selectedExam.kelas
             ).slice(0, 50);
-            const cleanPresensi = res.presensi.slice(0, 20);
-            const resultDocId = `res_${selectedExam.id}_${targetSavedKelas.replace(/[^a-zA-Z0-9]/g, '_')}_${cleanPresensi.replace(/[^a-zA-Z0-9]/g, '_')}`;
-            const bundleId = getClassResultBundleId(selectedExam.id, targetSavedKelas);
+            const cleanPresensi = res.presensi.padStart(2, '0').slice(0, 20);
+            const resultDocId = `res_${targetExamId}_${targetSavedKelas.replace(/[^a-zA-Z0-9]/g, '_')}_${cleanPresensi.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            const bundleId = getClassResultBundleId(targetExamId, targetSavedKelas);
 
-            // 1. Tampilkan nilai siswa seketika di layar & siap di-download ke Excel (0 ms delay)
+            // 1. Tampilkan nilai siswa seketika di layar & simpan ke localStorage + siap di-download ke Excel (0 ms delay)
             const storedEntry: StoredStudentResult = {
               id: resultDocId,
-              examId: selectedExam.id,
+              examId: targetExamId,
               studentId: cleanStudentId,
               presensi: cleanPresensi,
               nama: res.nama.slice(0, 120),
               kelas: targetSavedKelas,
-              mapel: selectedExam.mapel.slice(0, 100),
+              mapel: targetMapel,
               benar: res.benar,
               salah: res.salah,
               kosong: res.kosong,
@@ -1830,15 +1933,18 @@ export default function App() {
             const existingBundle = resultBundlesRef.current.get(bundleId) || {
               schoolId: SCHOOL_ID,
               ownerId: activeOwnerId,
-              examId: selectedExam.id,
+              examId: targetExamId,
               kelas: targetSavedKelas,
-              mapel: selectedExam.mapel.slice(0, 100),
+              mapel: targetMapel,
               hasilMap: {},
             };
 
             resultBundlesRef.current.set(bundleId, {
               ...existingBundle,
               ownerId: activeOwnerId,
+              examId: targetExamId,
+              kelas: targetSavedKelas,
+              mapel: targetMapel,
               hasilMap: {
                 ...existingBundle.hasilMap,
                 [cleanPresensi]: storedEntry,
@@ -1846,6 +1952,7 @@ export default function App() {
             });
 
             rebuildResultsFromBundles();
+            setScanKelasFilter(targetSavedKelas);
             setFilterKelasRekap(targetSavedKelas);
 
             // 2. Masukkan ke Antrean Bundel Kelas-Mapel (Otomatis digabung dalam 1 Write per Kelas setelah jeda 1.5 detik)
@@ -1859,7 +1966,7 @@ export default function App() {
             }, 1500);
 
             showNotification(
-              `Nilai LJK ${res.nama} (${targetSavedKelas} · ${selectedExam.mapel} · Skor: ${res.skor}) langsung tersimpan ke bundel kelas!`
+              `Nilai LJK ${res.nama} (${targetSavedKelas} · ${targetMapel} · Skor: ${res.skor}) langsung tersimpan!`
             );
           }}
         />

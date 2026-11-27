@@ -9,6 +9,8 @@ import {
 } from './ljkLayout';
 import { Exam, Student } from './ljkGenerator';
 
+export type OmrSensitivity = 'sangat_peka' | 'tinggi' | 'normal';
+
 export interface ScanResult {
   id?: string;
   examId?: string;
@@ -25,6 +27,10 @@ export interface ScanResult {
   detailJawaban: Record<string, string>;
   previewImage: string;
   anchorsDetected?: boolean;
+  qrRead?: boolean;
+  detectedMapel?: string;
+  detectedExamId?: string;
+  detectedJumlahSoal?: number;
 }
 
 export interface Point2D {
@@ -45,12 +51,19 @@ export interface AnchorDetectionResult {
   readyToCapture?: boolean;
 }
 
+interface QrIdentityPayload {
+  sId?: string;
+  prs?: string;
+  nm?: string;
+  kls?: string;
+  mpl?: string;
+  jml?: number;
+  eId?: string;
+}
+
 /**
  * Menghitung peta kecerahan khusus OMR (Blue-Suppressed Luminance):
- * Kertas LJK memiliki kop biru (#1e40af), garis kolom biru, dan lingkaran opsi biru (#2563eb / #60a5fa),
- * sedangkan 4 kotak anchor sudut (#000000) dan arsiran pensil/pulpen siswa bersifat gelap akromatik.
- * Dengan menekan saturasi biru (B > R), elemen cetak biru dianggap terang seperti kertas putih,
- * sedangkan kotak anchor hitam & bulatan jawaban yang dihitamkan siswa tampak sangat kontras.
+ * Mendukung LJK Hitam Putih maupun LJK Berwarna lama (menekan warna biru cetak agar tidak mengganggu deteksi bulatan).
  */
 function buildOmrLuminanceMap(
   imgData: Uint8ClampedArray,
@@ -63,12 +76,136 @@ function buildOmrLuminanceMap(
     const g = imgData[i + 1];
     const b = imgData[i + 2];
     const baseGray = (r * 77 + g * 150 + b * 29) >> 8;
-    // Jika piksel berwarna biru cetak (Blue jauh lebih tinggi dari Red), angkat kecerahannya
-    const blueExcess = b > r + 25 ? ((b - r - 25) * 3) >> 2 : 0;
+    const blueExcess = b > r + 22 ? ((b - r - 22) * 3) >> 2 : 0;
     const val = baseGray + blueExcess;
     lum[j] = val > 255 ? 255 : val;
   }
   return lum;
+}
+
+/**
+ * Membaca QR Code Identitas Siswa secara agresif:
+ * 1. Memotong area QR di kanan atas LJK (x=154..197mm, y=15..48mm), memperbesar 2.5x dengan interpolasi halus
+ * 2. Menjalankan multi-pass Contrast Stretching & Adaptive Local Thresholding agar QR code padat/agak buram di HP tetap terbaca.
+ */
+function decodeLjkQrCode(
+  sourceCanvas: HTMLCanvasElement,
+  isWarped: boolean
+): QrIdentityPayload | null {
+  const tryParseQr = (rawText?: string | null): QrIdentityPayload | null => {
+    if (!rawText) return null;
+    try {
+      const parsed = JSON.parse(rawText);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as QrIdentityPayload;
+      }
+    } catch {
+      // Abaikan jika bukan JSON
+    }
+    return null;
+  };
+
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const ctx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx || w === 0 || h === 0) return null;
+
+  // 1. Jika sudah di-warp ke 1050x742, fokus langsung ke koordinat kotak QR (x=154..197mm, y=15..48mm) dengan upscale 2.6x
+  const regions = isWarped
+    ? [
+        {
+          sx: Math.floor((154 / HALF_W) * w),
+          sy: Math.floor((15 / HALF_H) * h),
+          sw: Math.ceil((43 / HALF_W) * w),
+          sh: Math.ceil((33 / HALF_H) * h),
+          scale: 2.6,
+        },
+        {
+          sx: Math.floor((144 / HALF_W) * w),
+          sy: Math.floor((10 / HALF_H) * h),
+          sw: Math.ceil((60 / HALF_W) * w),
+          sh: Math.ceil((46 / HALF_H) * h),
+          scale: 2.2,
+        },
+      ]
+    : [
+        {
+          sx: Math.floor(w * 0.58),
+          sy: Math.floor(h * 0.04),
+          sw: Math.floor(w * 0.4),
+          sh: Math.floor(h * 0.44),
+          scale: 1.8,
+        },
+      ];
+
+  const cropCanvas = document.createElement('canvas');
+  const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+
+  if (cropCtx) {
+    for (const reg of regions) {
+      const targetW = Math.max(120, Math.round(reg.sw * reg.scale));
+      const targetH = Math.max(120, Math.round(reg.sh * reg.scale));
+      cropCanvas.width = targetW;
+      cropCanvas.height = targetH;
+      cropCtx.imageSmoothingEnabled = true;
+      cropCtx.drawImage(
+        sourceCanvas,
+        Math.max(0, reg.sx),
+        Math.max(0, reg.sy),
+        Math.min(w - reg.sx, reg.sw),
+        Math.min(h - reg.sy, reg.sh),
+        0,
+        0,
+        targetW,
+        targetH
+      );
+
+      const baseImg = cropCtx.getImageData(0, 0, targetW, targetH);
+      const rawRes = jsQR(baseImg.data, targetW, targetH, {
+        inversionAttempts: 'attemptBoth',
+      });
+      const parsedRaw = tryParseQr(rawRes?.data);
+      if (parsedRaw) return parsedRaw;
+
+      // Hitung min/max luminance di area QR untuk peregangan kontras & multi-threshold binarization
+      const gray = new Uint8Array(targetW * targetH);
+      let minG = 255;
+      let maxG = 0;
+      for (let i = 0, p = 0; i < baseImg.data.length; i += 4, p++) {
+        const g =
+          (baseImg.data[i] * 77 + baseImg.data[i + 1] * 150 + baseImg.data[i + 2] * 29) >> 8;
+        gray[p] = g;
+        if (g < minG) minG = g;
+        if (g > maxG) maxG = g;
+      }
+
+      const span = Math.max(20, maxG - minG);
+      const workData = new Uint8ClampedArray(baseImg.data.length);
+
+      // Multi-threshold passes (0.38, 0.46, 0.53, 0.60, 0.67) untuk mengatasi kamera HP yang agak gelap/silau
+      const ratios = [0.48, 0.55, 0.41, 0.62, 0.35];
+      for (const ratio of ratios) {
+        const thresh = minG + span * ratio;
+        for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+          const v = gray[p] < thresh ? 0 : 255;
+          workData[i] = v;
+          workData[i + 1] = v;
+          workData[i + 2] = v;
+          workData[i + 3] = 255;
+        }
+        const binQr = jsQR(workData, targetW, targetH, {
+          inversionAttempts: 'dontInvert',
+        });
+        const parsedBin = tryParseQr(binQr?.data);
+        if (parsedBin) return parsedBin;
+      }
+    }
+  }
+
+  // Fallback: coba pada seluruh citra
+  const fullData = ctx.getImageData(0, 0, w, h);
+  const fullQr = jsQR(fullData.data, w, h, { inversionAttempts: 'dontInvert' });
+  return tryParseQr(fullQr?.data);
 }
 
 /**
@@ -107,7 +244,6 @@ function findDarkSquareInRegion(
   const darkThresh = Math.min(160, minVal + (avg - minVal) * 0.44);
   const brightMoatThresh = Math.max(darkThresh + 18, avg * 0.82);
 
-  // Ukuran radius jendela kotak anchor (~1.3% dari dimensi terkecil)
   const winRadius = Math.max(2, Math.round(Math.min(width, height) * 0.013));
   const moatRadius = Math.max(winRadius + 3, Math.round(winRadius * 2.2));
 
@@ -128,7 +264,6 @@ function findDarkSquareInRegion(
     for (let x = searchX0; x < searchX1; x += 2) {
       if (lum[y * width + x] > darkThresh) continue;
 
-      // 1. Cek kepadatan hitam di dalam kotak anchor
       let darkPixels = 0;
       let totalWin = 0;
       for (let dy = -winRadius; dy <= winRadius; dy++) {
@@ -144,7 +279,6 @@ function findDarkSquareInRegion(
       const fillRatio = darkPixels / totalWin;
       if (fillRatio < 0.42) continue;
 
-      // 2. Cek apakah dikelilingi kertas terang (white moat) di 8 arah sekitar kotak
       const moatOffsets = [
         [-moatRadius, 0],
         [moatRadius, 0],
@@ -163,10 +297,8 @@ function findDarkSquareInRegion(
           brightSides++;
         }
       }
-      // Minimal 5 dari 8 titik sekeliling harus berupa kertas putih terang (bukan meja gelap/blok panjang)
       if (brightSides < 5) continue;
 
-      // Prioritaskan kotak hitam terisolasi yang paling dekat dengan sudut luar kuadran
       const distToCorner = Math.hypot(x - cornerX, y - cornerY);
       const cornerProximity = 1 - Math.min(1, distToCorner / maxDist);
       const moatBonus = brightSides / 8;
@@ -182,7 +314,6 @@ function findDarkSquareInRegion(
 
   if (bestX < 0 || bestY < 0) return null;
 
-  // Hitung centroid presisi sub-piksel di sekitar kandidat terbaik
   let cxSum = 0;
   let cySum = 0;
   let cWeight = 0;
@@ -212,7 +343,6 @@ function findDarkSquareInRegion(
 
 /**
  * Deteksi 4 kotak hitam sudut (HALF_ANCHORS) secara real-time ala EvalBee.
- * Mendukung estimasi sudut ke-4 secara geometris apabila 1 sudut tertutup bayangan/silau.
  */
 export function detectFourAnchors(
   ctx: CanvasRenderingContext2D,
@@ -241,7 +371,6 @@ export function detectFourAnchors(
 
   const rawCount = [tl, tr, bl, br].filter(Boolean).length;
 
-  // Jika 3 sudut terbaca jelas namun 1 sudut silau/bayangan, estimasi sudut ke-4 dengan aturan jajaran genjang
   if (rawCount === 3) {
     if (!br && tl && tr && bl) {
       br = { x: tr.x + (bl.x - tl.x), y: tr.y + (bl.y - tl.y) };
@@ -262,7 +391,6 @@ export function detectFourAnchors(
     const leftH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
     const rightH = Math.hypot(br.x - tr.x, br.y - tr.y);
 
-    // Pastikan tidak terbalik dan proporsi sesuai lembar LJK
     const isConvexOrder =
       tr.x > tl.x + width * 0.25 &&
       br.x > bl.x + width * 0.25 &&
@@ -334,7 +462,6 @@ export function probeLiveFrame(
 
 /**
  * Menyelesaikan sistem persamaan linear 8x8 (Eliminasi Gauss) untuk matriks Homografi Perspektif 3x3
- * yang memetakan titik ideal kanvas LJK (dst) -> titik kamera (src).
  */
 function solveHomographyMatrix(
   dstPts: [Point2D, Point2D, Point2D, Point2D],
@@ -393,12 +520,11 @@ function solveHomographyMatrix(
     }
   }
 
-  return b; // [h0, h1, h2, h3, h4, h5, h6, h7]
+  return b;
 }
 
 /**
  * Melakukan pelurusan perspektif 4-titik (True 8-DOF Projective Homography Warp)
- * dari 4 titik anchor yang terdeteksi ke ukuran kanvas standar LJK Setengah A4 (1050 x 742).
  */
 export function warpPerspectiveFromAnchors(
   sourceCanvas: HTMLCanvasElement,
@@ -418,7 +544,6 @@ export function warpPerspectiveFromAnchors(
   const outImg = outCtx.createImageData(targetW, targetH);
   const dstData = outImg.data;
 
-  // Pusat ideal tiap kotak anchor (6x6 mm) dalam koordinat mm (210 x 148.5 mm)
   const halfSize = HALF_ANCHORS.size / 2;
   const idealTL: Point2D = {
     x: ((HALF_ANCHORS.tl.x + halfSize) / HALF_W) * targetW,
@@ -486,10 +611,12 @@ export function warpPerspectiveFromAnchors(
 }
 
 /**
- * Mengukur tingkat penghitaman suatu bulatan jawaban dengan:
- * 1. Blue-Suppressed Luminance (mengabaikan garis biru lingkaran & huruf A-E biru muda)
- * 2. Micro-Search Sliding Window (±0.45 * radius) untuk mencari inti tergelap jika kertas melengkung/miring sedikit
- * 3. Cincin Kertas Lokal (1.25r - 1.65r) sebagai referensi kecerahan kertas di sekitar bulatan tersebut.
+ * Mengukur tingkat penghitaman bulatan jawaban dengan sensitivitas tinggi:
+ * - Menghitung meanCoreLum (rata-rata lingkaran dalam) DAN darkest35PctLum (rata-rata 35% piksel tergelap di dalam bulatan).
+ * - Mengapa darkest35PctLum sangat penting?
+ *   Ketika siswa mengisi jawaban dengan pensil tipis, arsiran tidak penuh, tanda silang (X), atau centang (✓),
+ *   piksel gelap hanya menempati 30-50% luas bulatan. Dengan menggabungkan darkest35PctLum (58%) + meanCoreLum (42%),
+ *   jawaban siswa tetap terdeteksi sangat tajam meskipun di bawah pencahayaan ruangan yang redup.
  */
 function measureBubbleFill(
   lum: Uint8Array,
@@ -502,16 +629,17 @@ function measureBubbleFill(
   bestX: number;
   bestY: number;
   coreLum: number;
+  darkest35Lum: number;
+  effLum: number;
   paperLum: number;
   darkRatio: number;
   fillScore: number;
 } {
-  const ringInnerR = radiusPx * 1.2;
+  const ringInnerR = radiusPx * 1.18;
   const ringOuterR = radiusPx * 1.65;
   const ringInnerR2 = ringInnerR * ringInnerR;
   const ringOuterR2 = ringOuterR * ringOuterR;
 
-  // 1. Ukur kecerahan kertas lokal di cincin luar bulatan
   const rx0 = Math.max(0, Math.floor(cx - ringOuterR));
   const ry0 = Math.max(0, Math.floor(cy - ringOuterR));
   const rx1 = Math.min(width - 1, Math.ceil(cx + ringOuterR));
@@ -530,24 +658,25 @@ function measureBubbleFill(
     }
   }
 
-  // Ambil persentil ke-70 dari cincin sekitar agar tidak terpengaruh huruf/garis tetangga
   paperSamples.sort((a, b) => a - b);
   const paperLum =
     paperSamples.length > 0
-      ? Math.max(80, paperSamples[Math.floor(paperSamples.length * 0.7)])
-      : 235;
+      ? Math.max(70, paperSamples[Math.floor(paperSamples.length * 0.72)])
+      : 225;
 
-  // 2. Micro-Search Sliding Window di sekitar (cx, cy) untuk menemukan pusat bulatan yang dihitamkan
-  const coreR = Math.max(2.5, radiusPx * 0.64);
+  // Micro-search sliding window di sekitar pusat bulatan (±0.42 * radius)
+  const coreR = Math.max(2.8, radiusPx * 0.72);
   const coreR2 = coreR * coreR;
-  const shiftStep = Math.max(1.5, radiusPx * 0.24);
-  const shifts = [-shiftStep * 1.8, -shiftStep * 0.9, 0, shiftStep * 0.9, shiftStep * 1.8];
+  const shiftStep = Math.max(1.2, radiusPx * 0.22);
+  const shifts = [-shiftStep * 1.6, -shiftStep * 0.8, 0, shiftStep * 0.8, shiftStep * 1.6];
 
-  let minCoreLum = 255;
+  let minEffLum = 255;
+  let bestCoreLum = 255;
+  let bestDarkest35Lum = 255;
   let bestX = cx;
   let bestY = cy;
   let bestDarkRatio = 0;
-  const darkPixelThresh = paperLum * 0.78;
+  const darkPixelThresh = paperLum * 0.86;
 
   for (let sy = 0; sy < shifts.length; sy++) {
     const testCy = cy + shifts[sy];
@@ -559,8 +688,8 @@ function measureBubbleFill(
       const bx1 = Math.min(width - 1, Math.ceil(testCx + coreR));
       const by1 = Math.min(height - 1, Math.ceil(testCy + coreR));
 
+      const corePixels: number[] = [];
       let sum = 0;
-      let count = 0;
       let darkCount = 0;
 
       for (let py = by0; py <= by1; py++) {
@@ -570,8 +699,8 @@ function measureBubbleFill(
           const dx = px - testCx;
           if (dx * dx + dy * dy <= coreR2) {
             const v = lum[rowOff + px];
+            corePixels.push(v);
             sum += v;
-            count++;
             if (v < darkPixelThresh) {
               darkCount++;
             }
@@ -579,10 +708,22 @@ function measureBubbleFill(
         }
       }
 
+      const count = corePixels.length;
       if (count > 0) {
+        corePixels.sort((a, b) => a - b);
+        const k35 = Math.max(1, Math.floor(count * 0.35));
+        let sum35 = 0;
+        for (let i = 0; i < k35; i++) {
+          sum35 += corePixels[i];
+        }
         const avgCore = sum / count;
-        if (avgCore < minCoreLum) {
-          minCoreLum = avgCore;
+        const avg35 = sum35 / k35;
+        const effLum = avgCore * 0.42 + avg35 * 0.58;
+
+        if (effLum < minEffLum) {
+          minEffLum = effLum;
+          bestCoreLum = avgCore;
+          bestDarkest35Lum = avg35;
           bestX = testCx;
           bestY = testCy;
           bestDarkRatio = darkCount / count;
@@ -591,13 +732,15 @@ function measureBubbleFill(
     }
   }
 
-  const contrastDrop = Math.max(0, (paperLum - minCoreLum) / paperLum);
-  const fillScore = contrastDrop * 0.62 + bestDarkRatio * 0.38;
+  const contrastDrop = Math.max(0, (paperLum - minEffLum) / Math.max(50, paperLum));
+  const fillScore = contrastDrop * 0.65 + bestDarkRatio * 0.35;
 
   return {
     bestX,
     bestY,
-    coreLum: minCoreLum,
+    coreLum: bestCoreLum,
+    darkest35Lum: bestDarkest35Lum,
+    effLum: minEffLum,
     paperLum,
     darkRatio: bestDarkRatio,
     fillScore,
@@ -606,7 +749,6 @@ function measureBubbleFill(
 
 /**
  * Kalibrasi otomatis pergeseran grid global (globalDx, globalDy) setelah warp
- * untuk mengkompensasi kemiringan kamera atau lengkungan kertas (±2.5 mm).
  */
 function calibrateGlobalGridOffset(
   lum: Uint8Array,
@@ -616,15 +758,14 @@ function calibrateGlobalGridOffset(
   scaleY: number,
   activeQuestionCount: number
 ): { dx: number; dy: number } {
-  const candidatesX = [-6, -3, 0, 3, 6];
-  const candidatesY = [-6, -3, 0, 3, 6];
+  const candidatesX = [-6, -4, -2, 0, 2, 4, 6];
+  const candidatesY = [-6, -4, -2, 0, 2, 4, 6];
 
   let bestOffset = { dx: 0, dy: 0 };
   let bestSharpness = -1;
 
-  // Uji pada sampel soal di 4 kolom
   const sampleQuestions: number[] = [];
-  for (let q = 1; q <= activeQuestionCount; q += 2) {
+  for (let q = 1; q <= activeQuestionCount; q++) {
     sampleQuestions.push(q);
   }
 
@@ -638,7 +779,7 @@ function calibrateGlobalGridOffset(
           const pos = getHalfBubblePosition(q, optIdx, 0);
           const cx = Math.round(pos.x * scaleX + dx);
           const cy = Math.round(pos.y * scaleY + dy);
-          const r = Math.max(2, Math.round(pos.radius * scaleX * 0.55));
+          const r = Math.max(2, Math.round(pos.radius * scaleX * 0.6));
 
           let s = 0;
           let c = 0;
@@ -656,8 +797,7 @@ function calibrateGlobalGridOffset(
         rowSpreadSum += maxLum - minLum;
       }
 
-      // Sedikit penalti untuk offset jauh agar memilih (0,0) jika kontras setara
-      const distPenalty = (Math.abs(dx) + Math.abs(dy)) * 0.4;
+      const distPenalty = (Math.abs(dx) + Math.abs(dy)) * 0.35;
       const score = rowSpreadSum - distPenalty;
       if (score > bestSharpness) {
         bestSharpness = score;
@@ -735,6 +875,8 @@ export function recalculateResultWithManualAnswers(
 
   return {
     ...prevResult,
+    examId: exam.id,
+    mapel: exam.mapel,
     benar,
     salah,
     kosong,
@@ -746,24 +888,25 @@ export function recalculateResultWithManualAnswers(
 
 /**
  * Memproses frame kamera / foto LJK Setengah A4 (Default 40 Soal) dengan:
- * 1. Deteksi 4 Anchor Sudut Otomatis (White-Moat Isolated Black Square) + 8-DOF Projective Homography Warp
- * 2. Pembacaan QR Code Siswa (sebelum & sesudah warp)
- * 3. Kalibrasi Grid Global + Micro-Search per Bulatan + Blue-Suppressed Adaptive Thresholding
+ * 1. Deteksi 4 Anchor Sudut Otomatis + 8-DOF Projective Homography Warp
+ * 2. Pembacaan QR Code Multi-Pass Cropped & Upscaled (Nama, Presensi, Kelas, Mapel, Jumlah Soal)
+ * 3. Deteksi Jawaban Siswa Sensitivitas Tinggi berbasis Darkest-35% Core Luminance & Row-Relative Signal-to-Noise
  */
 export function processCameraFrame(
   canvas: HTMLCanvasElement,
   exam: Exam,
-  students: Student[]
+  students: Student[],
+  sensitivity: OmrSensitivity = 'sangat_peka',
+  allExams: Exam[] = []
 ): ScanResult {
   const rawCtx = canvas.getContext('2d', { willReadFrequently: true })!;
 
-  // Coba baca QR pada citra asli sebelum warp (jika sudut kertas terpotong)
-  const preWarpImg = rawCtx.getImageData(0, 0, canvas.width, canvas.height);
-  let qr = jsQR(preWarpImg.data, canvas.width, canvas.height);
+  // 1. Coba baca QR pada citra asli sebelum warp
+  let qrPayload = decodeLjkQrCode(canvas, false);
 
   const anchorCheck = detectFourAnchors(rawCtx, canvas.width, canvas.height);
 
-  // Jika 4 anchor sudut terdeteksi, luruskan perspektif otomatis dengan matriks Homografi 8-DOF ke ukuran 1050x742
+  // 2. Jika 4 anchor sudut terdeteksi, luruskan perspektif otomatis dengan matriks Homografi 8-DOF ke ukuran 1050x742
   if (
     anchorCheck.locked &&
     anchorCheck.corners.tl &&
@@ -791,38 +934,86 @@ export function processCameraFrame(
   const w = canvas.width;
   const h = canvas.height;
 
-  // Baca QR Code pada citra yang sudah diluruskan jika belum terbaca
-  const fullImage = ctx.getImageData(0, 0, w, h);
-  if (!qr || !qr.data) {
-    qr = jsQR(fullImage.data, w, h);
+  // 3. Baca QR Code pada citra yang sudah diluruskan (Multi-Pass Upscaled QR Decoder)
+  if (!qrPayload) {
+    qrPayload = decodeLjkQrCode(canvas, true);
   }
 
   let student: Student | undefined;
-  if (qr?.data) {
-    try {
-      const parsed = JSON.parse(qr.data);
-      student =
-        students.find((s) => s.id === parsed.sId) ||
-        (parsed.nm || parsed.prs
-          ? {
-              id: parsed.sId || `qr_${parsed.prs || '01'}`,
-              presensi: parsed.prs || '01',
-              nama: parsed.nm || `Siswa Presensi ${parsed.prs || '01'}`,
-              kelas: parsed.kls || exam.kelas,
-            }
-          : undefined);
-    } catch {
-      // QR payload bukan JSON valid
+  let qrRead = false;
+  let detectedMapel: string | undefined;
+  let detectedExamId: string | undefined;
+  let detectedJumlahSoal: number | undefined;
+
+  if (qrPayload) {
+    qrRead = true;
+    detectedMapel = qrPayload.mpl ? String(qrPayload.mpl).trim() : undefined;
+    detectedExamId = qrPayload.eId ? String(qrPayload.eId).trim() : undefined;
+    if (qrPayload.jml && Number(qrPayload.jml) >= 1 && Number(qrPayload.jml) <= 40) {
+      detectedJumlahSoal = Number(qrPayload.jml);
+    }
+
+    const rawPrs = qrPayload.prs ? String(qrPayload.prs).trim().padStart(2, '0') : '';
+    const rawKls = qrPayload.kls ? String(qrPayload.kls).trim() : '';
+    const rawNm = qrPayload.nm ? String(qrPayload.nm).trim() : '';
+
+    // Cari di database siswa berdasarkan ID, atau kombinasi Kelas + Presensi, atau Nama
+    student =
+      (qrPayload.sId ? students.find((s) => s.id === qrPayload.sId) : undefined) ||
+      (rawKls && rawPrs
+        ? students.find(
+            (s) =>
+              s.kelas.toLowerCase() === rawKls.toLowerCase() &&
+              s.presensi.padStart(2, '0') === rawPrs
+          )
+        : undefined) ||
+      (rawNm
+        ? students.find((s) => s.nama.toLowerCase() === rawNm.toLowerCase())
+        : undefined) ||
+      (rawNm || rawPrs
+        ? {
+            id:
+              qrPayload.sId ||
+              `stu_${(rawKls || exam.kelas).replace(/[^a-zA-Z0-9]/g, '_')}_${rawPrs || '01'}`,
+            presensi: rawPrs || '01',
+            nama: rawNm || `Siswa Presensi ${rawPrs || '01'}`,
+            kelas: rawKls || exam.kelas,
+          }
+        : undefined);
+  }
+
+  // Cocokkan paket ujian secara otomatis jika QR lembar LJK menyebutkan Mapel / Exam ID berbeda dari dropdown awal
+  let gradingExam: Exam = exam;
+  if (allExams.length > 0 && (detectedExamId || detectedMapel)) {
+    const byId = detectedExamId ? allExams.find((e) => e.id === detectedExamId) : undefined;
+    const byMapelAndClass =
+      !byId && detectedMapel && student?.kelas
+        ? allExams.find(
+            (e) =>
+              e.mapel.toLowerCase() === detectedMapel!.toLowerCase() &&
+              e.kelas.toLowerCase() === student!.kelas.toLowerCase()
+          )
+        : undefined;
+    const byMapelOnly =
+      !byId && !byMapelAndClass && detectedMapel
+        ? allExams.find((e) => e.mapel.toLowerCase() === detectedMapel!.toLowerCase())
+        : undefined;
+
+    if (byId || byMapelAndClass || byMapelOnly) {
+      gradingExam = (byId || byMapelAndClass || byMapelOnly)!;
     }
   }
 
-  // Bangun peta kecerahan Blue-Suppressed untuk pembacaan bulatan jawaban yang akurat
+  const fullImage = ctx.getImageData(0, 0, w, h);
   const lumMap = buildOmrLuminanceMap(fullImage.data, w, h);
 
   const scaleX = w / HALF_W;
   const scaleY = h / HALF_H;
 
-  const activeQuestionCount = Math.min(DEFAULT_LJK_CAPACITY, Math.max(1, exam.jumlahSoal));
+  const activeQuestionCount = Math.min(
+    DEFAULT_LJK_CAPACITY,
+    Math.max(1, gradingExam.jumlahSoal)
+  );
 
   // Kalibrasi pergeseran halus grid bulatan
   const gridOffset = calibrateGlobalGridOffset(
@@ -834,7 +1025,7 @@ export function processCameraFrame(
     activeQuestionCount
   );
 
-  // Gambar penanda hijau pada 4 kotak anchor sudut di previewImage agar guru yakin LJK sudah lurus
+  // Gambar penanda hijau pada 4 kotak anchor sudut di previewImage
   if (anchorCheck.locked) {
     const halfSize = HALF_ANCHORS.size;
     ctx.strokeStyle = '#10b981';
@@ -849,6 +1040,16 @@ export function processCameraFrame(
     });
   }
 
+  // Ambang sensitivitas berdasarkan tingkat kepekaan yang dipilih guru
+  const minDropRatio =
+    sensitivity === 'sangat_peka' ? 0.036 : sensitivity === 'tinggi' ? 0.052 : 0.075;
+  const minDropAbs =
+    sensitivity === 'sangat_peka' ? 4.2 : sensitivity === 'tinggi' ? 6.2 : 9.0;
+  const noiseMultiplier =
+    sensitivity === 'sangat_peka' ? 1.32 : sensitivity === 'tinggi' ? 1.55 : 1.85;
+  const minFillScoreDiff =
+    sensitivity === 'sangat_peka' ? 0.042 : sensitivity === 'tinggi' ? 0.062 : 0.09;
+
   let benar = 0;
   let salah = 0;
   let kosong = 0;
@@ -857,13 +1058,12 @@ export function processCameraFrame(
   let statusRagu = false;
   const detailJawaban: Record<string, string> = {};
 
-  // Periksa tiap nomor soal aktif (1 s.d. activeQuestionCount)
   for (let q = 1; q <= DEFAULT_LJK_CAPACITY; q++) {
     if (q > activeQuestionCount) {
       const firstPos = getHalfBubblePosition(q, 0, 0);
       const lastPos = getHalfBubblePosition(q, 4, 0);
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+      ctx.lineWidth = 1.2;
       ctx.strokeRect(
         (firstPos.x - firstPos.radius) * scaleX + gridOffset.dx,
         (firstPos.y - firstPos.radius) * scaleY + gridOffset.dy,
@@ -873,8 +1073,11 @@ export function processCameraFrame(
       continue;
     }
 
-    const qKey = exam.kunciJawaban[String(q)];
-    if (!qKey) continue;
+    const qKey = gradingExam.kunciJawaban[String(q)] || {
+      type: 'PG' as const,
+      answers: ['A'],
+      weight: 2,
+    };
     maxPoin += qKey.weight;
 
     const rowScores = OPTIONS.map((opt, optIdx) => {
@@ -889,35 +1092,64 @@ export function processCameraFrame(
         cy: sample.bestY,
         r,
         coreLum: sample.coreLum,
+        darkest35Lum: sample.darkest35Lum,
+        effLum: sample.effLum,
         paperLum: sample.paperLum,
         darkRatio: sample.darkRatio,
         fillScore: sample.fillScore,
+        dropAbs: 0,
+        dropRatio: 0,
       };
     });
 
-    // Urutkan dari fillScore terendah (bulatan kosong) ke tertinggi (bulatan dihitamkan)
-    const sortedByFill = [...rowScores].sort((a, b) => a.fillScore - b.fillScore);
-    // Rata-rata 2 bulatan paling bersih di baris soal ini sebagai baseline kosong
-    const baselineEmpty = (sortedByFill[0].fillScore + sortedByFill[1].fillScore) / 2;
-
-    // Bulatan terdeteksi dihitamkan jika:
-    // - fillScore menonjol signifikan di atas bulatan kosong sebaris (baselineEmpty + 0.11) & minimal 0.15
-    // - ATAU fillScore absolut >= 0.27 (untuk PGK di mana banyak bulatan dihitamkan sekaligus)
-    let filled = rowScores.filter(
-      (b) =>
-        (b.fillScore >= baselineEmpty + 0.11 && b.fillScore >= 0.15) ||
-        b.fillScore >= 0.27 ||
-        (b.coreLum < b.paperLum * 0.77 && b.darkRatio >= 0.25)
+    // Urutkan dari paling terang (kosong) ke paling gelap (terisi) berdasarkan effLum
+    const sortedByBrightest = [...rowScores].sort((a, b) => b.effLum - a.effLum);
+    // 3 bulatan paling terang di baris ini menjadi referensi bulatan kosong lokal
+    const emptyRefLum =
+      (sortedByBrightest[0].effLum +
+        sortedByBrightest[1].effLum +
+        sortedByBrightest[2].effLum) /
+      3;
+    const emptyNoise = Math.max(
+      1.6,
+      sortedByBrightest[0].effLum - sortedByBrightest[2].effLum
     );
 
-    // Filter cerdas untuk soal Pilihan Ganda tunggal (PG):
-    // Jika ada bekas hapusan tipis (2 kandidat), namun kandidat terkuat jauh lebih pekat dari kandidat ke-2,
-    // ambil kandidat terkuat agar tidak salah menjadi DOBEL.
+    const sortedByFillAsc = [...rowScores].sort((a, b) => a.fillScore - b.fillScore);
+    const baselineEmptyScore =
+      (sortedByFillAsc[0].fillScore +
+        sortedByFillAsc[1].fillScore +
+        sortedByFillAsc[2].fillScore) /
+      3;
+
+    rowScores.forEach((b) => {
+      b.dropAbs = Math.max(0, emptyRefLum - b.effLum);
+      b.dropRatio = b.dropAbs / Math.max(45, emptyRefLum);
+    });
+
+    let filled = rowScores.filter(
+      (b) =>
+        (b.dropRatio >= minDropRatio &&
+          b.dropAbs >= minDropAbs &&
+          b.dropAbs >= emptyNoise * noiseMultiplier) ||
+        (b.fillScore >= baselineEmptyScore + minFillScoreDiff &&
+          b.fillScore >= minFillScoreDiff * 1.35) ||
+        b.fillScore >= 0.22 ||
+        (b.darkest35Lum < b.paperLum * 0.78 && b.dropAbs >= minDropAbs * 0.9)
+    );
+
+    // Disambiguasi cerdas untuk soal Pilihan Ganda tunggal (PG):
+    // Apabila sensitivitas tinggi mendeteksi >1 bulatan (misal karena bayangan jari atau bekas hapusan pensil),
+    // pilih bulatan yang paling gelap jika dominansinya jelas di atas kandidat kedua.
     if (qKey.type === 'PG' && filled.length > 1) {
-      const rankedFilled = [...filled].sort((a, b) => b.fillScore - a.fillScore);
-      const top1 = rankedFilled[0];
-      const top2 = rankedFilled[1];
-      if (top1.fillScore >= top2.fillScore + 0.13 && top2.fillScore < baselineEmpty + 0.20) {
+      const ranked = [...filled].sort((a, b) => b.dropAbs - a.dropAbs);
+      const top1 = ranked[0];
+      const top2 = ranked[1];
+      if (
+        top1.dropAbs >= top2.dropAbs * 1.28 ||
+        top1.dropAbs - top2.dropAbs >= 4.8 ||
+        top1.fillScore >= top2.fillScore + 0.065
+      ) {
         filled = [top1];
       }
     }
@@ -999,18 +1231,23 @@ export function processCameraFrame(
   const skor = maxPoin > 0 ? Number(((totalPoin / maxPoin) * 100).toFixed(1)) : 0;
 
   return {
+    examId: gradingExam.id,
     studentId: student?.id || `unknown_${Date.now()}`,
     presensi: student?.presensi || '-',
     nama: student?.nama || 'QR Tidak Terbaca',
-    kelas: student?.kelas || exam.kelas,
-    mapel: exam.mapel,
+    kelas: student?.kelas || gradingExam.kelas,
+    mapel: detectedMapel || gradingExam.mapel,
     benar,
     salah,
     kosong,
     skor,
     statusRagu: statusRagu || !student,
     detailJawaban,
-    previewImage: canvas.toDataURL('image/jpeg', 0.85),
+    previewImage: canvas.toDataURL('image/jpeg', 0.86),
     anchorsDetected: anchorCheck.locked,
+    qrRead,
+    detectedMapel,
+    detectedExamId: gradingExam.id,
+    detectedJumlahSoal,
   };
 }

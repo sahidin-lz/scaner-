@@ -82,6 +82,136 @@ export default function RecapPage({
 }: Props) {
   const [rekapSubTab, setRekapSubTab] = useState<'siswa' | 'kelas' | 'analisis'>('siswa');
 
+  // Kelompokkan hasil nilai LJK berdasarkan kombinasi Mata Pelajaran & Kelas agar tidak keluar bercampur semua
+  const groupedByMapelAndKelas = React.useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        key: string;
+        mapel: string;
+        kelas: string;
+        examObj: Exam | null;
+        rows: ScanResult[];
+        avg: number;
+        max: number;
+        min: number;
+        passCount: number;
+        passPct: number;
+      }
+    >();
+
+    filteredResults.forEach((r) => {
+      const matchedEx =
+        (r.examId && exams.find((e) => e.id === r.examId)) ||
+        (r.mapel
+          ? exams.find((e) => e.mapel.toLowerCase() === r.mapel.toLowerCase())
+          : null) ||
+        selectedExam;
+      const mpl = (r.mapel || matchedEx?.mapel || 'Mata Pelajaran').trim();
+      const kls = (r.kelas || matchedEx?.kelas || 'Kelas 10').trim();
+      const groupKey = `${mpl.toLowerCase()}::${kls.toLowerCase()}`;
+
+      const existing = map.get(groupKey);
+      if (existing) {
+        existing.rows.push(r);
+      } else {
+        map.set(groupKey, {
+          key: groupKey,
+          mapel: mpl,
+          kelas: kls,
+          examObj: matchedEx || null,
+          rows: [r],
+          avg: 0,
+          max: 0,
+          min: 0,
+          passCount: 0,
+          passPct: 0,
+        });
+      }
+    });
+
+    const groups = Array.from(map.values()).map((grp) => {
+      const sortedRows = [...grp.rows].sort((a, b) =>
+        a.presensi.padStart(2, '0').localeCompare(b.presensi.padStart(2, '0'))
+      );
+      const count = sortedRows.length;
+      const sum = sortedRows.reduce((acc, item) => acc + item.skor, 0);
+      const avg = count > 0 ? Number((sum / count).toFixed(1)) : 0;
+      const max =
+        count > 0 ? Math.max(...sortedRows.map((item) => item.skor)) : 0;
+      const min =
+        count > 0 ? Math.min(...sortedRows.map((item) => item.skor)) : 0;
+      const passCount = sortedRows.filter((item) => item.skor >= 75).length;
+      const passPct = count > 0 ? Math.round((passCount / count) * 100) : 0;
+
+      return {
+        ...grp,
+        rows: sortedRows,
+        avg,
+        max,
+        min,
+        passCount,
+        passPct,
+      };
+    });
+
+    return groups.sort((a, b) => {
+      const mCmp = a.mapel.localeCompare(b.mapel);
+      return mCmp !== 0 ? mCmp : a.kelas.localeCompare(b.kelas);
+    });
+  }, [exams, filteredResults, selectedExam]);
+
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string>('ALL_GROUPS');
+
+  const visibleGroups = React.useMemo(() => {
+    if (
+      selectedGroupKey === 'ALL_GROUPS' ||
+      !groupedByMapelAndKelas.some((g) => g.key === selectedGroupKey)
+    ) {
+      return groupedByMapelAndKelas;
+    }
+    return groupedByMapelAndKelas.filter((g) => g.key === selectedGroupKey);
+  }, [groupedByMapelAndKelas, selectedGroupKey]);
+
+  const handleDownloadGroupExcel = (grp: (typeof groupedByMapelAndKelas)[number]) => {
+    const soalCount = grp.examObj?.jumlahSoal || selectedExam?.jumlahSoal || 25;
+    exportResultsToExcel(`${grp.mapel}_${grp.kelas}`, grp.rows, soalCount);
+    showNotification(
+      `Daftar Nilai Excel (${grp.mapel} - ${grp.kelas}) berhasil diunduh!`
+    );
+  };
+
+  const handleDownloadGroupShadedPdf = (grp: (typeof groupedByMapelAndKelas)[number]) => {
+    const studentsList: Student[] = [];
+    const answersByStudentId: Record<string, Record<string, string>> = {};
+    grp.rows.forEach((r, idx) => {
+      const sId = r.id || `${r.studentId}_${idx}`;
+      studentsList.push({
+        id: sId,
+        presensi: r.presensi,
+        nama: r.nama,
+        kelas: r.kelas,
+      });
+      answersByStudentId[sId] = r.detailJawaban || {};
+    });
+
+    generateTwoInOneLJKPdf({
+      mapel: grp.mapel,
+      kelasLabel: grp.kelas,
+      namaUjian: grp.examObj?.namaUjian || 'HASIL REKAP LJK',
+      students: studentsList,
+      exam: grp.examObj || selectedExam,
+      answersByStudentId,
+      filePrefix: `LJK_Arsiran_${grp.mapel.replace(/\s+/g, '_')}`,
+    }).then((ok) => {
+      if (ok) {
+        showNotification(
+          `PDF LJK Arsiran (${grp.mapel} - ${grp.kelas}) berhasil diunduh!`
+        );
+      }
+    });
+  };
+
   return (
     <div className="space-y-4">
       {/* Header & Filter Bar yang Rapi (Judul di Atas, Baris Filter 3 Kolom di Bawah agar Tidak Pernah Terhimpit) */}
@@ -92,12 +222,12 @@ export default function RecapPage({
             <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
               <BarChart3 className="w-4 h-4 text-blue-600 shrink-0" />
               <span>
-                Rekapitulasi &amp; Analisis Nilai Ujian (
-                {filterKelasRekap === 'SEMUA' ? 'Semua Kelas' : filterKelasRekap})
+                Daftar Nilai LJK Dikelompokkan per Mapel &amp; Kelas (
+                {groupedByMapelAndKelas.length} Kelompok)
               </span>
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Filter kelas dan mata pelajaran di bawah untuk melihat nilai, rapor LJK siswa, atau mengunduh Excel
+              Setiap kelompok Mata Pelajaran &amp; Kelas terpisah rapi dan dapat diunduh Excel maupun PDF LJK Arsirannya masing-masing
             </p>
           </div>
 
@@ -107,25 +237,34 @@ export default function RecapPage({
               onClick={() => {
                 if (filteredResults.length === 0) {
                   showNotification(
-                    'Belum ada data hasil LJK pada kelas ini untuk dicetak arsirannya.',
+                    'Belum ada data hasil LJK untuk dicetak arsirannya.',
                     'warning'
                   );
                   return;
                 }
+                const targetRows =
+                  visibleGroups.length === 1
+                    ? visibleGroups[0].rows
+                    : filteredResults;
                 const activeExamObj =
+                  (visibleGroups.length === 1 && visibleGroups[0].examObj) ||
                   (filterMapelRekap !== 'SEMUA' &&
                     exams.find((e) => e.id === filterMapelRekap)) ||
                   selectedExam;
                 const labelMapel =
-                  activeExamObj?.mapel || filteredResults[0]?.mapel || 'Penilaian';
+                  (visibleGroups.length === 1 && visibleGroups[0].mapel) ||
+                  activeExamObj?.mapel ||
+                  targetRows[0]?.mapel ||
+                  'Penilaian';
                 const labelKelas =
-                  filterKelasRekap === 'SEMUA'
-                    ? filteredResults[0]?.kelas || 'Semua_Kelas'
-                    : filterKelasRekap;
+                  (visibleGroups.length === 1 && visibleGroups[0].kelas) ||
+                  (filterKelasRekap === 'SEMUA'
+                    ? targetRows[0]?.kelas || 'Semua_Kelas'
+                    : filterKelasRekap);
 
                 const studentsList: Student[] = [];
                 const answersByStudentId: Record<string, Record<string, string>> = {};
-                filteredResults.forEach((r, idx) => {
+                targetRows.forEach((r, idx) => {
                   const sId = r.id || `${r.studentId}_${idx}`;
                   studentsList.push({
                     id: sId,
@@ -147,7 +286,7 @@ export default function RecapPage({
                 }).then((ok) => {
                   if (ok) {
                     showNotification(
-                      `PDF LJK Berarsir Jawaban (${filteredResults.length} Siswa) berhasil diunduh!`
+                      `PDF LJK Berarsir Jawaban (${targetRows.length} Siswa) berhasil diunduh!`
                     );
                   }
                 });
@@ -164,9 +303,13 @@ export default function RecapPage({
               onClick={() => {
                 if (filteredResults.length === 0) {
                   showNotification(
-                    'Belum ada data hasil LJK pada kelas ini untuk diunduh.',
+                    'Belum ada data hasil LJK untuk diunduh.',
                     'warning'
                   );
+                  return;
+                }
+                if (visibleGroups.length === 1) {
+                  handleDownloadGroupExcel(visibleGroups[0]);
                   return;
                 }
                 const activeExamObj =
@@ -179,7 +322,7 @@ export default function RecapPage({
                   filterKelasRekap === 'SEMUA' ? 'Semua_Kelas' : filterKelasRekap;
                 exportResultsToExcel(`${labelMapel}_${labelKelas}`, filteredResults, soalCount);
                 showNotification(
-                  `Rekap Nilai Excel (${labelKelas}) lengkap dengan rincian jawaban berhasil diunduh!`
+                  `Daftar Nilai Excel (dikelompokkan per sheet Mapel & Kelas) berhasil diunduh!`
                 );
               }}
               className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
@@ -210,7 +353,10 @@ export default function RecapPage({
             </label>
             <select
               value={filterKelasRekap}
-              onChange={(e) => onChangeFilterKelasRekap(e.target.value)}
+              onChange={(e) => {
+                onChangeFilterKelasRekap(e.target.value);
+                setSelectedGroupKey('ALL_GROUPS');
+              }}
               className="w-full border border-slate-300 bg-white px-3 py-2 rounded-xl text-xs font-semibold text-slate-800"
             >
               <option value="SEMUA">Semua Kelas ({results.length} LJK)</option>
@@ -232,7 +378,10 @@ export default function RecapPage({
             </label>
             <select
               value={filterMapelRekap}
-              onChange={(e) => onChangeFilterMapelRekap(e.target.value)}
+              onChange={(e) => {
+                onChangeFilterMapelRekap(e.target.value);
+                setSelectedGroupKey('ALL_GROUPS');
+              }}
               className="w-full border border-slate-300 bg-white px-3 py-2 rounded-xl text-xs font-semibold text-slate-800 truncate"
             >
               <option value="SEMUA">Semua Mata Pelajaran ({results.length})</option>
@@ -314,7 +463,7 @@ export default function RecapPage({
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
-            1. Daftar Nilai Siswa ({filteredResults.length})
+            1. Daftar Nilai per Mapel &amp; Kelas ({groupedByMapelAndKelas.length} Kelompok)
           </button>
           <button
             type="button"
@@ -325,7 +474,7 @@ export default function RecapPage({
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
-            2. Perbandingan Antar Kelas ({classSummaryBreakdown.length})
+            2. Ringkasan Antar Kelas ({classSummaryBreakdown.length})
           </button>
           <button
             type="button"
@@ -348,7 +497,7 @@ export default function RecapPage({
                 Ringkasan Perbandingan Nilai Antar Kelas
               </span>
               <span className="text-[11px] text-slate-500">
-                Klik baris kelas untuk membuka daftar nilai siswa kelas tersebut
+                Klik baris kelas untuk membuka kelompok nilai kelas tersebut
               </span>
             </div>
             <div className="overflow-x-auto max-h-56 overflow-y-auto">
@@ -500,32 +649,62 @@ export default function RecapPage({
         )}
       </div>
 
-      {/* Tabel Hasil LJK Siswa + Panel Rapor LJK Individual (Hanya tampil jika tab 'siswa' dipilih) */}
+      {/* Daftar Nilai LJK Siswa yang Dikelompokkan per Mata Pelajaran & Kelas + Panel Rapor Individual */}
       {rekapSubTab === 'siswa' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
           <div
             className={`${
               inspectedResult ? 'lg:col-span-7' : 'lg:col-span-12'
-            } bg-white border border-slate-200 rounded-2xl p-5 space-y-4 overflow-hidden shadow-xs`}
+            } space-y-4`}
           >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900">
-                Daftar Nilai LJK Siswa (
-                {filterKelasRekap === 'SEMUA' ? 'Semua Kelas' : filterKelasRekap} ·{' '}
-                {filteredResults.length} Siswa)
-              </h3>
-              <span className="text-xs text-slate-500">
-                Klik baris siswa untuk membuka Rapor Detail Jawaban LJK
-              </span>
-            </div>
+            {/* Bar Pilihan Kelompok Mapel & Kelas (Jika ada > 1 kelompok agar tidak menumpuk) */}
+            {groupedByMapelAndKelas.length > 1 && (
+              <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-xs space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-slate-800">
+                    Pilih Kelompok Mata Pelajaran &amp; Kelas:
+                  </span>
+                  <span className="text-slate-500">
+                    {groupedByMapelAndKelas.length} Kelompok Tersedia
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedGroupKey('ALL_GROUPS')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                      selectedGroupKey === 'ALL_GROUPS'
+                        ? 'bg-blue-600 border-blue-600 text-white'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    Tampilkan Semua Kelompok ({groupedByMapelAndKelas.length})
+                  </button>
+                  {groupedByMapelAndKelas.map((grp) => (
+                    <button
+                      key={grp.key}
+                      type="button"
+                      onClick={() => setSelectedGroupKey(grp.key)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                        selectedGroupKey === grp.key
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      {grp.mapel} — {grp.kelas} ({grp.rows.length})
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
-            {filteredResults.length === 0 ? (
-              <div className="py-12 text-center border border-dashed border-slate-200 rounded-xl space-y-3">
+            {visibleGroups.length === 0 ? (
+              <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-3 shadow-xs">
                 <p className="text-sm font-semibold text-slate-700">
                   Belum Ada Hasil Koreksi LJK Tersimpan
                 </p>
                 <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Mulai pemindaian kamera untuk kelas ini atau kelola paket ujian pada menu Daftar Paket Ujian.
+                  Mulai pemindaian kamera untuk mata pelajaran dan kelas ini, maka daftar nilai akan otomatis dikelompokkan per Mapel &amp; Kelas.
                 </p>
                 <div className="flex items-center justify-center gap-2 pt-1">
                   <button
@@ -551,109 +730,170 @@ export default function RecapPage({
                 </div>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
-                      <th className="py-2.5 px-3 text-left font-semibold w-16">No</th>
-                      <th className="py-2.5 px-3 text-left font-semibold">Nama Siswa</th>
-                      <th className="py-2.5 px-3 text-left font-semibold w-36">Kelas</th>
-                      <th className="py-2.5 px-3 text-left font-semibold">Mapel</th>
-                      <th className="py-2.5 px-3 text-right font-semibold w-14">B</th>
-                      <th className="py-2.5 px-3 text-right font-semibold w-14">S</th>
-                      <th className="py-2.5 px-3 text-right font-semibold w-14">K</th>
-                      <th className="py-2.5 px-3 text-right font-semibold w-20">Nilai</th>
-                      <th className="py-2.5 px-3 text-right font-semibold w-28">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {filteredResults.map((r, i) => {
-                      const isInspected =
-                        inspectedResult &&
-                        (inspectedResult.id === r.id ||
-                          (inspectedResult.presensi === r.presensi &&
-                            inspectedResult.kelas === r.kelas));
-                      const isPass = r.skor >= 75;
-                      return (
-                        <tr
-                          key={r.id || i}
-                          onClick={() => onSelectInspectedResult(r)}
-                          className={`cursor-pointer transition-colors ${
-                            isInspected
-                              ? 'bg-blue-50/70'
-                              : r.statusRagu
-                              ? 'bg-amber-50/50 hover:bg-amber-50'
-                              : 'hover:bg-slate-50'
-                          }`}
-                        >
-                          <td className="py-2.5 px-3 font-mono tabular-nums font-semibold text-slate-800">
-                            {r.presensi}
-                          </td>
-                          <td className="py-2.5 px-3 font-medium text-slate-900">
-                            <div>{r.nama}</div>
-                            <span
-                              className={`text-[10px] font-semibold ${
-                                isPass ? 'text-emerald-700' : 'text-amber-700'
+              visibleGroups.map((grp) => (
+                <div
+                  key={grp.key}
+                  className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs"
+                >
+                  {/* Header Kelompok: Nama Mata Pelajaran, Kelas, Statistik & Tombol Download Khusus Kelompok Ini */}
+                  <div className="bg-slate-900 text-white px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-2.5 py-0.5 bg-blue-500/20 border border-blue-400/40 text-blue-200 rounded-lg text-[11px] font-bold">
+                          MAPEL: {grp.mapel.toUpperCase()}
+                        </span>
+                        <span className="px-2.5 py-0.5 bg-emerald-500/20 border border-emerald-400/40 text-emerald-200 rounded-lg text-[11px] font-bold">
+                          KELAS: {grp.kelas.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300 font-mono tabular-nums pt-0.5">
+                        <span>
+                          Jumlah: <strong className="text-white">{grp.rows.length} Siswa</strong>
+                        </span>
+                        <span>·</span>
+                        <span>
+                          Rata-Rata: <strong className="text-emerald-300">{grp.avg}</strong>
+                        </span>
+                        <span>·</span>
+                        <span>
+                          Tertinggi: <strong className="text-blue-300">{grp.max}</strong>
+                        </span>
+                        <span>·</span>
+                        <span>
+                          Tuntas: <strong className="text-white">{grp.passPct}%</strong>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadGroupShadedPdf(grp)}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                        title={`Cetak PDF LJK Arsiran khusus ${grp.mapel} - ${grp.kelas}`}
+                      >
+                        <CheckSquare className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                        LJK Arsiran ({grp.kelas})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadGroupExcel(grp)}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                        title={`Download Daftar Nilai Excel khusus ${grp.mapel} - ${grp.kelas}`}
+                      >
+                        <FileDown className="w-3.5 h-3.5 shrink-0" />
+                        Download Excel ({grp.mapel})
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Tabel Daftar Nilai Siswa untuk Kelompok Mapel & Kelas Ini */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
+                          <th className="py-2.5 px-3 text-left font-semibold w-16">No</th>
+                          <th className="py-2.5 px-3 text-left font-semibold">Nama Siswa</th>
+                          <th className="py-2.5 px-3 text-left font-semibold">Mata Pelajaran</th>
+                          <th className="py-2.5 px-3 text-left font-semibold w-36">Kelas</th>
+                          <th className="py-2.5 px-3 text-right font-semibold w-14">B</th>
+                          <th className="py-2.5 px-3 text-right font-semibold w-14">S</th>
+                          <th className="py-2.5 px-3 text-right font-semibold w-14">K</th>
+                          <th className="py-2.5 px-3 text-right font-semibold w-20">Nilai</th>
+                          <th className="py-2.5 px-3 text-right font-semibold w-28">Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {grp.rows.map((r, i) => {
+                          const isInspected =
+                            inspectedResult &&
+                            (inspectedResult.id === r.id ||
+                              (inspectedResult.presensi === r.presensi &&
+                                inspectedResult.kelas === r.kelas &&
+                                inspectedResult.mapel === r.mapel));
+                          const isPass = r.skor >= 75;
+                          return (
+                            <tr
+                              key={r.id || `${grp.key}_${i}`}
+                              onClick={() => onSelectInspectedResult(r)}
+                              className={`cursor-pointer transition-colors ${
+                                isInspected
+                                  ? 'bg-blue-50/70'
+                                  : r.statusRagu
+                                  ? 'bg-amber-50/50 hover:bg-amber-50'
+                                  : 'hover:bg-slate-50'
                               }`}
                             >
-                              {isPass ? 'Tuntas' : 'Perlu Remedial'}
-                              {r.statusRagu ? ' · Cek Manual' : ''}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <span className="text-xs font-semibold text-slate-700 whitespace-nowrap">
-                              {r.kelas}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 text-xs text-slate-600 truncate max-w-[140px]">
-                            {r.mapel || selectedExam?.mapel || '-'}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-emerald-700">
-                            {r.benar}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums text-red-600">
-                            {r.salah}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-500">
-                            {r.kosong}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-blue-600">
-                            {r.skor}
-                          </td>
-                          <td className="py-2.5 px-3 text-right">
-                            <div className="inline-flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onSelectInspectedResult(r);
-                                }}
-                                className="inline-flex items-center gap-1 px-2 py-1 bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-700 rounded text-xs font-semibold transition-colors cursor-pointer"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                LJK
-                              </button>
-                              {r.id && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDeleteResult(r.id);
-                                  }}
-                                  title="Hapus hasil scan ini"
-                                  className="p-1 text-slate-400 hover:text-red-600 rounded transition-colors cursor-pointer"
+                              <td className="py-2.5 px-3 font-mono tabular-nums font-semibold text-slate-800">
+                                {r.presensi.padStart(2, '0')}
+                              </td>
+                              <td className="py-2.5 px-3 font-medium text-slate-900">
+                                <div>{r.nama}</div>
+                                <span
+                                  className={`text-[10px] font-semibold ${
+                                    isPass ? 'text-emerald-700' : 'text-amber-700'
+                                  }`}
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                                  {isPass ? 'Tuntas' : 'Perlu Remedial'}
+                                  {r.statusRagu ? ' · Cek Manual' : ''}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-xs font-semibold text-blue-700">
+                                {grp.mapel}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <span className="text-xs font-semibold text-slate-700 whitespace-nowrap">
+                                  {grp.kelas}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-emerald-700">
+                                {r.benar}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono tabular-nums text-red-600">
+                                {r.salah}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-500">
+                                {r.kosong}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-blue-600">
+                                {r.skor}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onSelectInspectedResult(r);
+                                    }}
+                                    className="inline-flex items-center gap-1 px-2 py-1 bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-700 rounded text-xs font-semibold transition-colors cursor-pointer"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    LJK
+                                  </button>
+                                  {r.id && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onDeleteResult(r.id);
+                                      }}
+                                      title="Hapus hasil scan ini"
+                                      className="p-1 text-slate-400 hover:text-red-600 rounded transition-colors cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))
             )}
           </div>
 

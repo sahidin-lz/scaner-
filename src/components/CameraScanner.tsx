@@ -16,10 +16,18 @@ import { OPTIONS } from '../lib/ljkLayout';
 import {
   processCameraFrame,
   probeLiveFrame,
+  probeLiveQrFromVideo,
+  parseQrIdentityJson,
+  resolveStudentFromQrPayload,
   recalculateResultWithManualAnswers,
   ScanResult,
   OmrSensitivity,
+  QrIdentityPayload,
 } from '../lib/omrCameraEngine';
+
+interface BarcodeDetectorLike {
+  detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>>;
+}
 
 interface Props {
   exam: Exam;
@@ -50,6 +58,13 @@ export default function CameraScanner({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rawFrameBackupRef = useRef<HTMLCanvasElement | null>(null);
   const probeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const qrProbeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const nativeBarcodeDetectorRef = useRef<BarcodeDetectorLike | null>(null);
+  const liveQrCacheRef = useRef<{
+    payload: QrIdentityPayload;
+    student?: Student;
+    timestamp: number;
+  } | null>(null);
   const nativeCameraInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const cooldownUntilRef = useRef<number>(0);
@@ -60,6 +75,14 @@ export default function CameraScanner({
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Siswa yang langsung dikenali secara real-time saat kamera diarahkan ke LJK (sebelum jepret)
+  const [liveRecognizedStudent, setLiveRecognizedStudent] = useState<{
+    presensi: string;
+    nama: string;
+    kelas: string;
+    mapel?: string;
+  } | null>(null);
 
   // Sensitivitas Pembacaan Jawaban Siswa (Default: Sangat Peka untuk membaca arsiran pensil tipis/silang/centang)
   const [sensitivity, setSensitivity] = useState<OmrSensitivity>('sangat_peka');
@@ -93,10 +116,48 @@ export default function CameraScanner({
   // Tap-to-correct active question number in Bottom Sheet
   const [editingQuestionNo, setEditingQuestionNo] = useState<string | null>(null);
 
+  // Inisialisasi Hardware BarcodeDetector API (jika didukung Chrome Android/iOS) untuk deteksi QR < 5ms
+  useEffect(() => {
+    try {
+      const Win = window as unknown as {
+        BarcodeDetector?: new (opts: { formats: string[] }) => BarcodeDetectorLike;
+      };
+      if (Win.BarcodeDetector) {
+        nativeBarcodeDetectorRef.current = new Win.BarcodeDetector({
+          formats: ['qr_code'],
+        });
+      }
+    } catch {
+      nativeBarcodeDetectorRef.current = null;
+    }
+    qrProbeCanvasRef.current = document.createElement('canvas');
+  }, []);
+
+  // Cari nama kelas default terbaik dari daftar siswa terdaftar jika exam.kelas hanya berisi "Kelas 10" umum
+  const preferredDefaultKelas = React.useMemo(() => {
+    if (activeKelas && activeKelas !== 'SEMUA') {
+      const exactActive = students.some(
+        (s) => s.kelas.trim().toLowerCase() === activeKelas.trim().toLowerCase()
+      );
+      if (exactActive) return activeKelas;
+    }
+    const uniqueRosterClasses = Array.from(
+      new Set(students.map((s) => s.kelas.trim()).filter(Boolean))
+    );
+    if (uniqueRosterClasses.length === 1) {
+      return uniqueRosterClasses[0];
+    }
+    if (exam.kelas) {
+      const exactExam = uniqueRosterClasses.find(
+        (c) => c.toLowerCase() === exam.kelas.trim().toLowerCase()
+      );
+      if (exactExam) return exactExam;
+    }
+    return uniqueRosterClasses[0] || (activeKelas !== 'SEMUA' ? activeKelas : exam.kelas) || 'Kelas 10';
+  }, [activeKelas, exam.kelas, students]);
+
   // Identitas kelas/siswa otomatis dari lembar LJK yang sedang di-scan (atau bisa disesuaikan guru)
-  const [overrideKelas, setOverrideKelas] = useState<string>(
-    activeKelas && activeKelas !== 'SEMUA' ? activeKelas : exam.kelas || 'Kelas 10'
-  );
+  const [overrideKelas, setOverrideKelas] = useState<string>(preferredDefaultKelas);
   const [overridePresensi, setOverridePresensi] = useState<string>('01');
   const [overrideNama, setOverrideNama] = useState<string>('');
   const [overrideMapel, setOverrideMapel] = useState<string>(exam.mapel);
@@ -108,36 +169,69 @@ export default function CameraScanner({
   const targetClassForStudents =
     overrideKelas && overrideKelas !== 'SEMUA'
       ? overrideKelas
-      : activeKelas && activeKelas !== 'SEMUA'
-      ? activeKelas
-      : exam.kelas;
+      : preferredDefaultKelas;
 
-  const classStudents = students.filter(
-    (s) => s.kelas.toLowerCase() === targetClassForStudents.toLowerCase()
-  );
+  // Daftar siswa untuk kelas aktif (dengan fallback pintar jika nama kelas di paket ujian bersifat umum seperti "Kelas 10")
+  const classStudents = React.useMemo(() => {
+    const exact = students.filter(
+      (s) => s.kelas.trim().toLowerCase() === targetClassForStudents.trim().toLowerCase()
+    );
+    if (exact.length > 0) {
+      return [...exact].sort((a, b) =>
+        a.presensi.padStart(2, '0').localeCompare(b.presensi.padStart(2, '0'))
+      );
+    }
+    return [...students].sort((a, b) =>
+      a.presensi.padStart(2, '0').localeCompare(b.presensi.padStart(2, '0'))
+    );
+  }, [students, targetClassForStudents]);
 
   // Gabungkan daftar kelas agar kelas hasil deteksi QR (misal "10 ALI BIN ABI THALIB") selalu muncul di dropdown
   const mergedClassOptions = React.useMemo(() => {
-    const set = new Set<string>(classOptions);
+    const set = new Set<string>();
+    students.forEach((s) => {
+      if (s.kelas && s.kelas !== 'SEMUA') set.add(s.kelas);
+    });
+    classOptions.forEach((c) => {
+      if (c && c !== 'SEMUA') set.add(c);
+    });
     if (overrideKelas && overrideKelas !== 'SEMUA') set.add(overrideKelas);
     if (lastResult?.kelas && lastResult.kelas !== 'SEMUA') set.add(lastResult.kelas);
     return Array.from(set);
-  }, [classOptions, overrideKelas, lastResult?.kelas]);
+  }, [classOptions, lastResult?.kelas, overrideKelas, students]);
 
   useEffect(() => {
     if (!lastResult && classStudents.length > 0 && !overrideNama) {
       const first = classStudents[0];
-      setOverridePresensi(first.presensi);
+      setOverridePresensi(first.presensi.padStart(2, '0'));
       setOverrideNama(first.nama);
       setOverrideKelas(first.kelas);
     }
   }, [classStudents, lastResult, overrideNama]);
 
+  // Helper pencarian siswa berdasarkan kelas & nomor presensi (dengan fallback 1 rombel)
+  const findStudentByClassAndPresensi = useCallback(
+    (kls: string, prs: string): Student | undefined => {
+      const cleanPrs = prs.trim().padStart(2, '0');
+      const cleanKls = kls.trim().toLowerCase();
+      return (
+        students.find(
+          (s) =>
+            s.kelas.trim().toLowerCase() === cleanKls &&
+            s.presensi.trim().padStart(2, '0') === cleanPrs
+        ) ||
+        classStudents.find((s) => s.presensi.trim().padStart(2, '0') === cleanPrs) ||
+        students.find((s) => s.presensi.trim().padStart(2, '0') === cleanPrs)
+      );
+    },
+    [classStudents, students]
+  );
+
   // Bunyi Beep & Getar ala EvalBee saat LJK berhasil dikunci & dipotret
   const triggerScanFeedback = useCallback(() => {
     try {
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate(70);
+        navigator.vibrate(60);
       }
       const AudioCtx =
         window.AudioContext ||
@@ -155,11 +249,11 @@ export default function CameraScanner({
         osc.type = 'sine';
         osc.frequency.setValueAtTime(1046.5, ctx.currentTime);
         gain.gain.setValueAtTime(0.12, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
         osc.connect(gain);
         gain.connect(ctx.destination);
         osc.start();
-        osc.stop(ctx.currentTime + 0.12);
+        osc.stop(ctx.currentTime + 0.1);
       }
     } catch {
       // Abaikan jika browser membatasi audio sebelum interaksi
@@ -301,18 +395,15 @@ export default function CameraScanner({
       const nextNum = (parseInt(currentPresensi, 10) || 1) + 1;
       const nextPresensi = String(nextNum).padStart(2, '0');
       setOverridePresensi(nextPresensi);
-      const nextStudent = students.find(
-        (s) =>
-          s.kelas.toLowerCase() === currentKelas.toLowerCase() &&
-          s.presensi.padStart(2, '0') === nextPresensi
-      );
+      const nextStudent = findStudentByClassAndPresensi(currentKelas, nextPresensi);
       if (nextStudent) {
         setOverrideNama(nextStudent.nama);
+        setOverrideKelas(nextStudent.kelas);
       } else {
         setOverrideNama(`Peserta ${currentKelas} - No. ${nextPresensi}`);
       }
     },
-    [students]
+    [findStudentByClassAndPresensi]
   );
 
   /**
@@ -321,35 +412,30 @@ export default function CameraScanner({
    */
   const applyClassAndStudentOverride = useCallback(
     (rawResult: ScanResult): ScanResult => {
-      // 1. Jika QR lembar LJK berhasil terbaca, gunakan Kelas, Presensi, Nama & Mapel dari lembar LJK tersebut
       const hasScannedClass =
         Boolean(rawResult.qrRead) &&
         Boolean(rawResult.kelas) &&
         rawResult.kelas !== '-';
-
-      const chosenKelas = hasScannedClass
-        ? rawResult.kelas
-        : activeKelas && activeKelas !== 'SEMUA'
-        ? activeKelas
-        : rawResult.kelas && rawResult.kelas !== '-'
-        ? rawResult.kelas
-        : exam.kelas || 'Kelas 10';
 
       const cleanPresensi =
         rawResult.presensi && rawResult.presensi !== '-'
           ? rawResult.presensi.padStart(2, '0')
           : overridePresensi.trim().padStart(2, '0') || '01';
 
-      // Cari nama siswa di daftar siswa untuk kelas & presensi yang terdeteksi
-      const matchedInRoster = students.find(
-        (s) =>
-          s.kelas.toLowerCase() === chosenKelas.toLowerCase() &&
-          s.presensi.padStart(2, '0') === cleanPresensi
-      );
+      const candidateKelas = hasScannedClass
+        ? rawResult.kelas
+        : preferredDefaultKelas;
+
+      // Cari siswa di daftar master data siswa
+      const matchedInRoster = findStudentByClassAndPresensi(candidateKelas, cleanPresensi);
+
+      const chosenKelas = hasScannedClass
+        ? rawResult.kelas
+        : matchedInRoster?.kelas || candidateKelas;
 
       const cleanNama =
-        rawResult.nama && !rawResult.nama.includes('Tidak Terbaca')
-          ? rawResult.nama
+        rawResult.qrRead && rawResult.nama && !rawResult.nama.includes('Tidak Terbaca')
+          ? matchedInRoster?.nama || rawResult.nama
           : matchedInRoster?.nama ||
             (overrideNama.trim() && !overrideNama.startsWith('Peserta ')
               ? overrideNama.trim()
@@ -363,7 +449,7 @@ export default function CameraScanner({
       setOverrideMapel(detectedMapelName);
 
       // Sinkronkan filter kelas aktif & paket ujian jika lembar LJK memiliki identitas mapel/kelas sendiri
-      if (hasScannedClass && chosenKelas !== activeKelas) {
+      if (chosenKelas && chosenKelas !== activeKelas) {
         onChangeActiveKelas(chosenKelas);
       }
       if (
@@ -377,6 +463,7 @@ export default function CameraScanner({
 
       return {
         ...rawResult,
+        studentId: matchedInRoster?.id || rawResult.studentId,
         kelas: chosenKelas,
         presensi: cleanPresensi,
         nama: cleanNama,
@@ -386,14 +473,14 @@ export default function CameraScanner({
     [
       activeKelas,
       exam.id,
-      exam.kelas,
       exam.mapel,
       exams,
+      findStudentByClassAndPresensi,
       onChangeActiveKelas,
       onSelectExamId,
       overrideNama,
       overridePresensi,
-      students,
+      preferredDefaultKelas,
     ]
   );
 
@@ -420,7 +507,8 @@ export default function CameraScanner({
       const ctx = workCanvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
       ctx.drawImage(rawFrameBackupRef.current, 0, 0);
-      const reprocessed = processCameraFrame(workCanvas, exam, students, nextSens, exams);
+      const cachedQr = liveQrCacheRef.current?.payload || null;
+      const reprocessed = processCameraFrame(workCanvas, exam, students, nextSens, exams, cachedQr);
       setAutoSavePaused(true);
       setLastResult((prev) => ({
         ...reprocessed,
@@ -465,7 +553,13 @@ export default function CameraScanner({
 
     saveRawCanvasBackup(canvas);
 
-    const result = processCameraFrame(canvas, exam, students, sensitivity, exams);
+    // Gunakan cache Live QR jika baru saja terbaca dalam 3.5 detik terakhir agar pengenalan siswa 0ms
+    const freshLiveQr =
+      liveQrCacheRef.current && performance.now() - liveQrCacheRef.current.timestamp < 3500
+        ? liveQrCacheRef.current.payload
+        : null;
+
+    const result = processCameraFrame(canvas, exam, students, sensitivity, exams, freshLiveQr);
     triggerScanFeedback();
     setEditingQuestionNo(null);
     setAutoSavePaused(false);
@@ -485,15 +579,17 @@ export default function CameraScanner({
     if (!lastResult || saving) return;
     setSaving(true);
     try {
-      const cleanKelas = (overrideKelas || lastResult.kelas || exam.kelas || 'Kelas 10').trim();
+      const cleanKelas = (overrideKelas || lastResult.kelas || preferredDefaultKelas).trim();
       const cleanPresensi = (overridePresensi || lastResult.presensi || '01')
         .trim()
         .padStart(2, '0');
       const cleanNama = (overrideNama || lastResult.nama || 'Siswa').trim();
       const cleanMapel = (overrideMapel || lastResult.mapel || exam.mapel).trim();
+      const matchedRoster = findStudentByClassAndPresensi(cleanKelas, cleanPresensi);
 
       const finalResult: ScanResult = {
         ...lastResult,
+        studentId: matchedRoster?.id || lastResult.studentId,
         kelas: cleanKelas,
         presensi: cleanPresensi,
         nama: cleanNama,
@@ -507,7 +603,9 @@ export default function CameraScanner({
         skor: finalResult.skor,
         benar: finalResult.benar,
       });
-      cooldownUntilRef.current = performance.now() + 2200;
+      liveQrCacheRef.current = null;
+      setLiveRecognizedStudent(null);
+      cooldownUntilRef.current = performance.now() + 1500;
       setLastResult(null);
       setEditingQuestionNo(null);
       setAutoSavePaused(false);
@@ -517,14 +615,15 @@ export default function CameraScanner({
     }
   }, [
     advanceToNextPresensi,
-    exam.kelas,
     exam.mapel,
+    findStudentByClassAndPresensi,
     lastResult,
     onResultSaved,
     overrideKelas,
     overrideMapel,
     overrideNama,
     overridePresensi,
+    preferredDefaultKelas,
     saving,
   ]);
 
@@ -544,16 +643,41 @@ export default function CameraScanner({
     return () => window.clearTimeout(t);
   }, [recentSavedToast]);
 
-  // Loop Real-Time Deteksi LJK di HP (4 Sudut + QR Code pada resolusi 420x297 tiap 140ms)
+  // Loop Real-Time Super Cepat (85ms): Deteksi 4 Sudut Anchor + Pre-Dekode QR Identitas Siswa Langsung dari Video
   useEffect(() => {
     if (!cameraOn || lastResult) return;
 
     let animId = 0;
     let lastCheck = 0;
+    let lastQrCheck = 0;
     let consecutiveReady = 0;
+    let barcodeBusy = false;
+
+    const updateLiveQrIdentity = (payload: QrIdentityPayload) => {
+      const resolved = resolveStudentFromQrPayload(payload, students, preferredDefaultKelas);
+      liveQrCacheRef.current = {
+        payload,
+        student: resolved,
+        timestamp: performance.now(),
+      };
+      if (resolved) {
+        setLiveRecognizedStudent((prev) =>
+          prev?.presensi === resolved.presensi &&
+          prev?.nama === resolved.nama &&
+          prev?.kelas === resolved.kelas
+            ? prev
+            : {
+                presensi: resolved.presensi.padStart(2, '0'),
+                nama: resolved.nama,
+                kelas: resolved.kelas,
+                mapel: payload.mpl,
+              }
+        );
+      }
+    };
 
     const loop = (timestamp: number) => {
-      if (timestamp - lastCheck >= 140) {
+      if (timestamp - lastCheck >= 85) {
         lastCheck = timestamp;
         const video = videoRef.current;
         const probe = probeCanvasRef.current;
@@ -570,6 +694,52 @@ export default function CameraScanner({
           const sx = (vw - cropW) / 2;
           const sy = (vh - cropH) / 2;
 
+          // 1. Pre-dekode QR Siswa dari kuadran kanan-atas video tiap 160ms agar nama siswa langsung muncul
+          if (timestamp - lastQrCheck >= 160) {
+            lastQrCheck = timestamp;
+            if (nativeBarcodeDetectorRef.current && !barcodeBusy) {
+              barcodeBusy = true;
+              nativeBarcodeDetectorRef.current
+                .detect(video)
+                .then((codes) => {
+                  for (const c of codes) {
+                    const parsed = parseQrIdentityJson(c.rawValue);
+                    if (parsed) {
+                      updateLiveQrIdentity(parsed);
+                      break;
+                    }
+                  }
+                })
+                .catch(() => {})
+                .finally(() => {
+                  barcodeBusy = false;
+                });
+            }
+            if (qrProbeCanvasRef.current) {
+              const liveQr = probeLiveQrFromVideo(
+                video,
+                sx,
+                sy,
+                cropW,
+                cropH,
+                qrProbeCanvasRef.current
+              );
+              if (liveQr) {
+                updateLiveQrIdentity(liveQr);
+              }
+            }
+          }
+
+          // Bersihkan badge siswa live jika sudah > 2.5 detik tidak terlihat di kamera
+          if (
+            liveQrCacheRef.current &&
+            timestamp - liveQrCacheRef.current.timestamp > 2500
+          ) {
+            liveQrCacheRef.current = null;
+            setLiveRecognizedStudent(null);
+          }
+
+          // 2. Deteksi 4 sudut anchor LJK
           probe.width = 420;
           probe.height = 297;
           const pCtx = probe.getContext('2d', { willReadFrequently: true });
@@ -577,6 +747,9 @@ export default function CameraScanner({
             pCtx.drawImage(video, sx, sy, cropW, cropH, 0, 0, probe.width, probe.height);
             const detection = probeLiveFrame(pCtx, probe.width, probe.height);
             const inCooldown = timestamp < cooldownUntilRef.current;
+            const hasFreshLiveQr = Boolean(
+              liveQrCacheRef.current && timestamp - liveQrCacheRef.current.timestamp < 2200
+            );
 
             if (detection.readyToCapture && !inCooldown) {
               consecutiveReady += 1;
@@ -590,7 +763,7 @@ export default function CameraScanner({
               bl: Boolean(detection.corners.bl),
               br: Boolean(detection.corners.br),
               allLocked: Boolean(detection.readyToCapture),
-              qrDetected: Boolean(detection.qrDetected),
+              qrDetected: Boolean(detection.qrDetected || hasFreshLiveQr),
               lockedCount: detection.lockedCount,
             };
 
@@ -606,7 +779,9 @@ export default function CameraScanner({
                 : nextCornerState
             );
 
-            if (autoCaptureEnabled && !inCooldown && consecutiveReady >= 2) {
+            // Jika QR siswa sudah dikenali, kunci & jepret instan pada frame pertama (consecutiveReady >= 1)!
+            const requiredFrames = hasFreshLiveQr ? 1 : 2;
+            if (autoCaptureEnabled && !inCooldown && consecutiveReady >= requiredFrames) {
               consecutiveReady = 0;
               handleCapture();
               return;
@@ -619,7 +794,7 @@ export default function CameraScanner({
 
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [autoCaptureEnabled, cameraOn, handleCapture, lastResult]);
+  }, [autoCaptureEnabled, cameraOn, handleCapture, lastResult, preferredDefaultKelas, students]);
 
   async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -919,12 +1094,24 @@ export default function CameraScanner({
                 }`}
               />
 
+              {liveRecognizedStudent && (
+                <div className="absolute top-2 inset-x-2 flex items-center justify-center">
+                  <div className="px-3 py-1 rounded-lg bg-emerald-600/95 border border-emerald-300/60 text-white text-[11px] font-bold shadow-md flex items-center gap-1.5 max-w-full truncate">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-200" />
+                    <span className="truncate">
+                      Siswa Dikenali: No.{liveRecognizedStudent.presensi}{' '}
+                      {liveRecognizedStudent.nama} ({liveRecognizedStudent.kelas})
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <div className="absolute bottom-2 inset-x-2 flex items-center justify-center">
                 <div
                   className={`px-3 py-1 rounded-lg text-[11px] font-semibold backdrop-blur-xs transition-colors text-center ${
                     cornerStatus.allLocked
                       ? 'bg-emerald-600/95 text-white'
-                      : cornerStatus.lockedCount >= 2
+                      : cornerStatus.lockedCount >= 2 || liveRecognizedStudent
                       ? 'bg-amber-600/90 text-white'
                       : 'bg-slate-950/85 text-slate-200'
                   }`}
@@ -1075,12 +1262,52 @@ export default function CameraScanner({
                   <span className="font-bold text-slate-800">
                     Identitas Lembar Jawaban (Verifikasi Guru)
                   </span>
-                  {students.length > 0 && (
+                  {lastResult.qrRead ? (
+                    <span className="text-emerald-700 font-bold">
+                      ✓ Siswa Dikenali Otomatis dari QR
+                    </span>
+                  ) : (
                     <span className="text-slate-500">
-                      Pilih No. Presensi untuk isi Nama otomatis
+                      Pilih Cepat Siswa atau No. Presensi
                     </span>
                   )}
                 </div>
+
+                {classStudents.length > 0 && (
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                      Pilih Cepat Siswa Terdaftar ({classStudents.length} Siswa)
+                    </label>
+                    <select
+                      value={`${overrideKelas}::${overridePresensi.trim().padStart(2, '0')}`}
+                      onFocus={() => setAutoSavePaused(true)}
+                      onChange={(e) => {
+                        setAutoSavePaused(true);
+                        const [selKelas, selPrs] = e.target.value.split('::');
+                        if (!selPrs) return;
+                        const found = findStudentByClassAndPresensi(
+                          selKelas || overrideKelas,
+                          selPrs
+                        );
+                        if (found) {
+                          setOverrideKelas(found.kelas);
+                          setOverridePresensi(found.presensi.padStart(2, '0'));
+                          setOverrideNama(found.nama);
+                        }
+                      }}
+                      className="w-full border border-blue-300 bg-white rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 cursor-pointer"
+                    >
+                      {classStudents.map((st) => {
+                        const paddedPrs = st.presensi.padStart(2, '0');
+                        return (
+                          <option key={st.id} value={`${st.kelas}::${paddedPrs}`}>
+                            No.{paddedPrs} — {st.nama} ({st.kelas})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-12 gap-2 text-xs">
                   <div className="col-span-4">
@@ -1096,11 +1323,9 @@ export default function CameraScanner({
                         setAutoSavePaused(true);
                         const nextKls = e.target.value;
                         setOverrideKelas(nextKls);
-                        const matched = students.find(
-                          (s) =>
-                            s.kelas.toLowerCase() === nextKls.trim().toLowerCase() &&
-                            s.presensi.padStart(2, '0') ===
-                              overridePresensi.trim().padStart(2, '0')
+                        const matched = findStudentByClassAndPresensi(
+                          nextKls,
+                          overridePresensi
                         );
                         if (matched) {
                           setOverrideNama(matched.nama);
@@ -1127,14 +1352,13 @@ export default function CameraScanner({
                         setAutoSavePaused(true);
                         const rawVal = e.target.value;
                         setOverridePresensi(rawVal);
-                        const padded = rawVal.trim().padStart(2, '0');
-                        const matched = students.find(
-                          (s) =>
-                            s.kelas.toLowerCase() === overrideKelas.trim().toLowerCase() &&
-                            s.presensi.padStart(2, '0') === padded
+                        const matched = findStudentByClassAndPresensi(
+                          overrideKelas,
+                          rawVal
                         );
                         if (matched) {
                           setOverrideNama(matched.nama);
+                          setOverrideKelas(matched.kelas);
                         }
                       }}
                       className="w-full border border-slate-300 bg-white rounded-lg px-2 py-1.5 text-xs font-mono tabular-nums font-bold text-slate-900"

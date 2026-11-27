@@ -291,14 +291,14 @@ async function drawSingleHalfLJKPdf(
   });
   const qrDataUrl = await QRCode.toDataURL(qrPayload, {
     errorCorrectionLevel: 'L',
-    margin: 1,
-    width: 220,
+    margin: 2,
+    width: 260,
     color: {
       dark: '#000000',
       light: '#ffffff',
     },
   });
-  doc.addImage(qrDataUrl, 'PNG', 166.5, tableY + 4.3, 21, 20.2);
+  doc.addImage(qrDataUrl, 'PNG', 166.2, tableY + 4.1, 21.6, 20.5);
 
   // 5. Header & Bingkai 4 Kolom Jawaban Hitam Putih Tanpa Zebra Abu-abu (01-10, 11-20, 21-30, 31-40)
   const colStartX = [27, 70, 113, 156];
@@ -767,15 +767,15 @@ export async function renderFilledLJKToCanvas(
   });
   const qrDataUrl = await QRCode.toDataURL(qrPayload, {
     errorCorrectionLevel: 'L',
-    margin: 1,
-    width: 220,
+    margin: 2,
+    width: 260,
   });
   const qrImg = new Image();
   await new Promise<void>((resolve) => {
     qrImg.onload = () => resolve();
     qrImg.src = qrDataUrl;
   });
-  ctx.drawImage(qrImg, 166.5 * scaleX, (tableY + 4.3) * scaleY, 21 * scaleX, 20.2 * scaleY);
+  ctx.drawImage(qrImg, 166.2 * scaleX, (tableY + 4.1) * scaleY, 21.6 * scaleX, 20.5 * scaleY);
 
   // 5. Header 4 Kolom Hitam Putih Tanpa Zebra
   const colStartX = [27, 70, 113, 156];
